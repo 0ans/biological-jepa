@@ -146,7 +146,8 @@ def run_study(study_name: str, seeds=(0, 1, 2), k_folds: int = 5,
         for opp in BOOTSTRAP_OPPONENTS:
             if opp == ours:
                 continue
-            # الدلالة الأساسية: تجميع البذور مع بقاء المريض عنقوداً (مريض×بذرة)
+            # primary inference: pool seeds with each patient as its own
+            # cluster (patient x seed)
             x = np.concatenate([err_seed[ours][s][f_name] for s in seeds])
             y = np.concatenate([err_seed[opp][s][f_name] for s in seeds])
             cl = np.concatenate([subj_seed[s][f_name] + f"__s{s}" for s in seeds])

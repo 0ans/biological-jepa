@@ -228,7 +228,8 @@ class BioJEPA2(nn.Module):
             + w_sup * (losses["sup_future"] + losses.get("sup_current", 0.0))
 
         if rule_engine is not None and w_bio > 0:
-            # القيود تقيد التنبؤ نفسه — الحقيقة المستقبلية ليست شرطاً
+            # the rules constrain the prediction itself — future ground
+            # truth is not a requirement
             bio = rule_engine.penalty(dyn_i, pred_abs, dt, severity,
                                       cur_mask=mask_i, patient_ids=patient_ids)
             losses["bio_total"] = bio["total"]

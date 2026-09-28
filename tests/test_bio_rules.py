@@ -161,7 +161,7 @@ def test_rules_constrain_prediction_without_future_truth():
             pred[low_bio, d] -= 5.0 * t["dt"][low_bio]
     p_a = float(engine.penalty(t["dyn_i"], pred, t["dt"], t["severity"],
                                cur_mask=torch.ones_like(t["mask_i"]))["decline_capacity"])
-    # نفس cur ونفس pred — الحقيقة المستقبلية لا تدخل في المعادلة أصلاً
+    # same cur and same pred — future truth never enters the equation
     p_b = float(engine.penalty(t["dyn_i"], pred, t["dt"], t["severity"],
                                cur_mask=torch.ones_like(t["mask_i"]))["decline_capacity"])
     assert p_a == p_b > 0, "penalty must be a pure function of (cur, prediction)"
@@ -175,12 +175,12 @@ def test_r3_unique_patients_and_masks():
     engine = prepared.engine
     sev = t["severity"]
     B = sev.shape[0]
-    # 12 عنصراً من مريضين فقط: 6 أزواج لمريض شديد العلوضة و6 لأخف
+    # 12 items from only two patients: 6 pairs high-severity, 6 low
     ids = (["P_high"] * 6 + ["P_low"] * 6)[:B]
     if len(ids) < B:
         ids = ids + [f"P_fill_{k}" for k in range(B - len(ids))]
     ids = torch.tensor([hash(x) % 10_000 for x in ids])
-    # مريض منخفض الشدة يُتوقع له تدهور أسرع → انتهاك الترتيب
+    # low-severity patient predicted to decline faster -> ordering violation
     pred = t["dyn_j"].clone()
     low = torch.zeros(B, dtype=torch.bool)
     low[[i for i, x in enumerate(ids.tolist()) if x == ids[6].item()]] = True
@@ -192,7 +192,7 @@ def test_r3_unique_patients_and_masks():
     pen_fire = float(engine.penalty(t["dyn_i"], pred, t["dt"], sev,
                                     cur_mask=torch.ones_like(t["mask_i"]),
                                     patient_ids=[str(x) for x in ids.tolist()])["total"])
-    # كل الخلايا غير مقيسة → لا شيء يُعاقب
+    # every cell unmeasured -> nothing to penalize
     empty_mask = torch.zeros_like(t["mask_i"])
     pen_masked = float(engine.penalty(t["dyn_i"], pred, t["dt"], sev,
                                       cur_mask=empty_mask,
