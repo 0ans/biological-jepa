@@ -26,7 +26,7 @@ from .evaluate import (degraded_dyn_lookup, evaluate_predictions, gru_predict,
                        jepa_predict_degraded, jepa_rollout, cluster_paired_bootstrap,
                        paired_auc_bootstrap, ridge_predict)
 from .model.baselines import (HGBBaseline, RidgeBaseline, carry_forward_predict,
-                              ridge_design_matrix, train_gru)
+                              train_gru)
 from .pipeline import prepare
 from .train import train_jepa
 
@@ -108,7 +108,6 @@ def run_study(study_name: str, seeds=(0, 1, 2), k_folds: int = 5,
                 metrics, conv = evaluate_predictions(prepared, "test", pred_std, return_conv=True)
                 per_model[name].append(metrics)
                 truth, cur = prepared.truth_std("test")
-                dt = np.array([p["dt"] for p in prepared.pairs["test"]])
                 for f_name, f_idx in feat_idx.items():
                     m_ = np.isfinite(truth[:, f_idx])
                     e = np.abs(prepared.dyn_std.inverse(pred_std)[m_, f_idx]
@@ -278,7 +277,7 @@ def print_table(result, study_name):
     print("\n--- significance (cluster bootstrap over patients, ours = jepa_v2_bio) ---")
     for k, v in result["significance"].items():
         extra = f"auc {v.get('auc_ours', 0):.3f} vs {v.get('auc_opp', 0):.3f}" if "AUC" in k \
-            else f"ΔMAE {v['mean_diff']:+.4f}±{v['std_diff']:.4f}"
+            else f"ΔMAE {v['mean_diff']:+.4f} [{v['ci_low']:+.4f}, {v['ci_high']:+.4f}]"
         pp = v.get("p_cluster_pooled")
         print(f"  {k:48s} {extra}  p_pooled = {pp:.4f}" if pp is not None else
               f"  {k:48s} {extra}  p_per_seed = {v.get('p_per_seed')}")

@@ -26,7 +26,7 @@ from .data.adni import load_adni
 from .data.dataset import make_pair_sets, subject_kfold
 from .evaluate import evaluate_predictions, gru_predict, jepa_predict, ridge_predict
 from .model.bio_rules import compute_severity
-from .model.baselines import carry_forward_predict, ridge_design_matrix
+from .model.baselines import carry_forward_predict
 from .run_experiments import MODEL_CONFIGS, fit_predict
 from .pipeline import prepare
 

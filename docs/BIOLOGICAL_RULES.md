@@ -40,7 +40,8 @@ reasoning about the disease — it is exploiting statistical shortcuts.
 2. Observed decline rates are computed on training pairs only and binned by
    mean severity (5 bins).
 3. The **noise envelope** `NoiseEnv_f` is the 90th percentile of |rate| in the
-   lowest-severity decile, where cascade biology implies near-zero true
+   lowest-severity quintile of patients, where cascade biology implies
+   near-zero true
    decline — so that quantile estimates pure measurement noise.
 4. The **biological envelope** is the per-bin 90th percentile of observed
    rates minus the noise envelope: an estimate of what biology — not noise —

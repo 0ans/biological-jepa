@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from biojepa.data.synthetic import simulate_cascade
-from biojepa.model.bio_rules import RuleConfig, compute_severity, fit_capacity_table, BiologicalRuleEngine
+from biojepa.model.bio_rules import compute_severity
 from biojepa.data.dataset import make_pair_sets, subject_split
 from biojepa.pipeline import prepare
 
@@ -118,7 +118,6 @@ def test_causal_ranking_rule():
     sev_mean = sev.mean(dim=1)
     B = sev.shape[0]
     k = max(4, B // 4)
-    high_idx = sev_mean.topk(k).indices
     low_idx = (-sev_mean).topk(k).indices
 
     pen_ok = float(engine.penalty(t["dyn_i"], t["dyn_j"].clone(), t["dt"], sev)["total"])

@@ -13,9 +13,9 @@ trajectory, with the biological-rule engine constraining predicted trajectories.
 from __future__ import annotations
 
 import os
+import warnings
 
 import numpy as np
-import pandas as pd
 import pyreadr
 
 from .dataset import FeatureSpec, Study, Subject
@@ -36,43 +36,46 @@ _STATIC_COLS = ["AGE", "GENDER", "EDUCATION", "APOE4"]
 
 def load_adni(path: str = DATA_PATH) -> Study:
     table = list(pyreadr.read_r(path).values())[0]
-    vis = table["VISCODE"].astype(str)
-    table = table[vis.str.match(r"^(bl|m0|m\d+)$")].copy()
-    table["DX_bl"] = table["DX_bl"].astype(str).replace("", "UNK").replace("nan", "UNK")
+    with warnings.catch_warnings():
+        # pyreadr hands several columns over as float/categorical arrays that
+        # contain NaNs; pandas emits benign RuntimeWarnings while casting them
+        # to str/float32, and every missing value is handled explicitly below.
+        warnings.simplefilter("ignore", RuntimeWarning)
+        vis = table["VISCODE"].astype(str)
+        table = table[vis.str.match(r"^(bl|m0|m\d+)$")].copy()
+        table["DX_bl"] = table["DX_bl"].astype(str).replace("", "UNK").replace("nan", "UNK")
 
-    subjects: list[Subject] = []
-    for rid, g in table.groupby("RID"):
-        g = g.sort_values("YEARS_bl")
-        times = g["YEARS_bl"].to_numpy(dtype=np.float32)
-        dyn = g[_DYN_COLS].to_numpy(dtype=np.float32)
-        # merge duplicate time stamps (m0 vs bl): the rows are the same
-        # visit — average the available measurements
-        uniq_t, inv = np.unique(np.round(times, 4), return_inverse=True)
-        if len(uniq_t) != len(times):
-            # merge duplicate stamps (m0 vs bl): the rows are the SAME visit —
-            # average the available (non-missing) measurements per feature
-            dyn_u = np.full((len(uniq_t), dyn.shape[1]), np.nan, dtype=np.float32)
-            for gi in range(len(uniq_t)):
-                block = dyn[inv == gi]
-                if np.isfinite(block).any():
-                    with np.errstate(all="ignore"):
+        subjects: list[Subject] = []
+        for rid, g in table.groupby("RID"):
+            g = g.sort_values("YEARS_bl")
+            times = g["YEARS_bl"].to_numpy(dtype=np.float32)
+            dyn = g[_DYN_COLS].to_numpy(dtype=np.float32)
+            # merge duplicate time stamps (m0 vs bl): the rows are the SAME
+            # visit — average the available (non-missing) measurements per
+            # feature (a deduplication choice, not an unbiased estimator)
+            uniq_t, inv = np.unique(np.round(times, 4), return_inverse=True)
+            if len(uniq_t) != len(times):
+                dyn_u = np.full((len(uniq_t), dyn.shape[1]), np.nan, dtype=np.float32)
+                for gi in range(len(uniq_t)):
+                    block = dyn[inv == gi]
+                    if np.isfinite(block).any():
                         dyn_u[gi] = np.nanmean(block, axis=0)
-            times, dyn = uniq_t.astype(np.float32), dyn_u
-        static = g[_STATIC_COLS].iloc[0].to_numpy(dtype=np.float32)
-        patho = g[_PATHO_COLS].iloc[0].to_numpy(dtype=np.float32)
-        status = g[_STATUS_COLS].iloc[0].fillna(-1).to_numpy(dtype=np.float32)
-        subjects.append(Subject(
-            sid=f"ADNI_{int(rid)}",
-            times=times,
-            dyn=dyn,
-            static=static,
-            patho=patho,
-            patho_status=status,
-            group=str(g["DX_bl"].iloc[0]),
-            converts=bool(g["ConvertedToDementia"].iloc[0] > 0),
-            time_under_risk=float(g["TimeUnderRiskDementia"].iloc[0])
-            if np.isfinite(g["TimeUnderRiskDementia"].iloc[0]) else None,
-        ))
+                times, dyn = uniq_t.astype(np.float32), dyn_u
+            static = g[_STATIC_COLS].iloc[0].to_numpy(dtype=np.float32)
+            patho = g[_PATHO_COLS].iloc[0].to_numpy(dtype=np.float32)
+            status = g[_STATUS_COLS].iloc[0].fillna(-1).to_numpy(dtype=np.float32)
+            subjects.append(Subject(
+                sid=f"ADNI_{int(rid)}",
+                times=times,
+                dyn=dyn,
+                static=static,
+                patho=patho,
+                patho_status=status,
+                group=str(g["DX_bl"].iloc[0]),
+                converts=bool(g["ConvertedToDementia"].iloc[0] > 0),
+                time_under_risk=float(g["TimeUnderRiskDementia"].iloc[0])
+                if np.isfinite(g["TimeUnderRiskDementia"].iloc[0]) else None,
+            ))
     return Study(
         name="adni",
         dyn_specs=DYN_SPECS,

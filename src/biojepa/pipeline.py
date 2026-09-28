@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 from .data.dataset import Study, make_pair_sets, subject_split
-from .model.bio_rules import (BiologicalRuleEngine, CapacityTable, RuleConfig,
+from .model.bio_rules import (BiologicalRuleEngine, RuleConfig,
                               compute_severity, fit_capacity_table)
 from .utils import Standardizer, fourier_time
 

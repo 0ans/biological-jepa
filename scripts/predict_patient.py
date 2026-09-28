@@ -14,7 +14,6 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import numpy as np
-import torch
 
 from biojepa.data.adni import load_adni
 from biojepa.data.dataset import subject_kfold

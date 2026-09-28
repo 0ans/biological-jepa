@@ -192,6 +192,10 @@ def paired_auc_bootstrap(scores_a, labels, scores_b, n_boot: int = 10000, seed: 
             continue
         diffs.append(roc_auc_score(labels[idx], a[idx]) - roc_auc_score(labels[idx], b[idx]))
     diffs = np.array(diffs)
+    if len(diffs) == 0:  # every resample degenerate (all-one-class labels)
+        return {"auc_a": float(auc_a), "auc_b": float(auc_b),
+                "mean_diff": float(auc_a - auc_b), "ci_low": np.nan, "ci_high": np.nan,
+                "p": np.nan}
     ci = np.percentile(diffs, [2.5, 97.5])
     p = 2.0 * min((diffs <= 0).mean(), (diffs >= 0).mean())
     return {"auc_a": float(auc_a), "auc_b": float(auc_b), "mean_diff": float(auc_a - auc_b),
@@ -216,7 +220,6 @@ def jepa_predict_degraded(model, prepared, split: str, degraded: list[np.ndarray
                           device=torch.device("cpu"), version: str = "v2") -> np.ndarray:
     """v2 JEPA prediction with degraded input histories (truth untouched)."""
     pairs = prepared.pairs[split]
-    D = len(prepared.study.dyn_specs)
     L = max(p["i"] + 1 for p in pairs)
     seq = np.zeros((len(pairs), L, prepared.step_dim), dtype=np.float32)
     lens = np.zeros(len(pairs), dtype=np.int64)
@@ -314,8 +317,6 @@ def gru_rollout(model, prepared, split: str, device=torch.device("cpu"),
 
     seqs, lengths = gru_collate(study, pairs, lambda s: prepared.dyn_by_subject[s],
                                 prepared.x_context)
-    ctx_dim = prepared.x_context.shape[1]
-    L = seqs.shape[1] + steps
     seqs = np.concatenate([seqs, np.zeros((len(pairs), steps, seqs.shape[2]), dtype=np.float32)], axis=1)
     lens = lengths.copy()
     model.eval()

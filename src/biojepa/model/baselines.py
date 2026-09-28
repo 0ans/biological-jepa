@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 
 from .jepa import masked_mse, mlp
-from ..utils import Standardizer, fourier_time
+from ..utils import fourier_time
 
 
 # ----------------------------------------------------------------- GRU model

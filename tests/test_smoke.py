@@ -11,11 +11,9 @@ from biojepa.pipeline import prepare
 from biojepa.train import train_jepa
 from biojepa.evaluate import jepa_predict, evaluate_predictions
 from biojepa.model.baselines import carry_forward_predict, RidgeBaseline, ridge_design_matrix
-from biojepa.run_experiments import run_study
 
 
 def test_end_to_end_smoke(tmp_path):
-    res = run_study.__wrapped__ if hasattr(run_study, "__wrapped__") else None
     # tiny end-to-end run on synthetic-like data via direct components
     study = simulate_cascade(n_subjects=60, seed=3)
     prepared = prepare(study, seed=3)

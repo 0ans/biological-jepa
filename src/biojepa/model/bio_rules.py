@@ -33,6 +33,7 @@ study exercises every rule, including A/T/N monotonicity.
 """
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -346,10 +347,15 @@ class BiologicalRuleEngine:
     def observed_decline_rates(self, cur_std: np.ndarray, fut_std: np.ndarray,
                                dt: np.ndarray) -> np.ndarray:
         """Mean clinical decline rate per sample (positive = worsening);
-        features unobserved at either end are skipped (nan-mean)."""
+        features unobserved at either end are skipped (nan-mean). Samples with
+        no observed clinical cells yield NaN (callers filter them)."""
         rates = []
         for d in self.c_idx:
             spec = self.study.dyn_specs[d]
             dec = (fut_std[:, d] - cur_std[:, d]) if spec.higher_is_worse else (cur_std[:, d] - fut_std[:, d])
             rates.append(dec / np.maximum(dt, 1e-3))
-        return np.nanmean(np.stack(rates, axis=1), axis=1)
+        with warnings.catch_warnings():
+            # all-NaN rows are a documented outcome (no observed cells), not an
+            # anomaly — silence the empty-slice notice
+            warnings.simplefilter("ignore", RuntimeWarning)
+            return np.nanmean(np.stack(rates, axis=1), axis=1)

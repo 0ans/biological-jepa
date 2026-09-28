@@ -31,28 +31,30 @@ the model is allowed to imagine: an effect requires a cause.
 
 | | JEPA-v2 | **JEPA-v2+Bio** | GRU | HGB | Ridge | Carry-fwd |
 |---|---|---|---|---|---|---|
-| MMSE MAE @12 mo ↓ | 1.557 | **1.515** (λ2: **1.511**) | 1.582 | 1.545 | 1.599 | 1.696 |
-| CDR-SB MAE @36 mo ↓ | 1.227 | 1.189 (λ2) | 1.202 | **1.201** | 1.299 | 1.408 |
-| bio-penalty ablation (patient-level permutation) | — | **ADAS13 p=0.0001 ✓ (survives Bonferroni)** · CDRSB p=0.0054 · MMSE p=0.083 | | | | |
-| MAE at 75% input degradation ↓ | 3.99 | 4.08 | **3.98** | 4.49 | 4.13 | — |
+| MMSE MAE @12 mo ↓ | 1.530 | **1.517** (λ2: 1.518) | 1.577 | 1.545 | 1.599 | 1.696 |
+| CDR-SB MAE @36 mo ↓ | 1.222 | 1.196 (λ2: 1.206) | **1.201** | 1.202 | 1.298 | 1.408 |
+| bio-penalty ablation (patient-level permutation) | — | **ADAS13 p=0.0025 ✓ (survives Bonferroni)** · CDRSB p=0.0001 ✓ · MMSE p=0.34 | | | | |
+| MAE at 75% input degradation ↓ | 3.99 | 4.08 | **3.98** | 4.43 | 4.12 | — |
 
 **Conversion AUC — two different measurements, never mixed:**
-- 15-run CV aggregate (mixed follow-up windows): JEPA+Bio 0.686 — Ridge
-  leads this metric (0.724).
+- 15-run CV aggregate (mixed follow-up windows): JEPA+Bio 0.683 — Ridge
+  leads this metric (0.725).
 - Single held-out fold, prospective design (baseline input, fixed 36-month
   window, time-under-risk labels, n=141): JEPA+Bio λ2 **0.952** vs GRU 0.927
   vs HGB 0.935 — a hard-test result, NOT a CV aggregate.
 
 Three honest statements:
 
-1. **The biological constraints help on 2 of 3 clinical scales** (ADAS13
-   survives full Bonferroni correction; MMSE does not at the patient level —
-   the earlier pair-level p=0.0002 was inflated and is superseded).
+1. **The biological constraints help on 2 of 3 clinical scales** (ADAS13 and
+   CDR-SB survive full Bonferroni correction at the patient level; MMSE does
+   not — the earlier pair-level p=0.0002 was inflated and is superseded).
 2. **Robustness to missing data is the structural win**: at 25-50% input
-   degradation JEPA+Bio is the most accurate of all models, and its relative
-   degradation at 75% (+85%) is far below HGB's (+98%); GRU is the closest
-   competitor (+75%) with worse absolute error.
-3. **Honest losses**: HGB keeps CDR-SB@24/36; Ridge keeps conversion AUC.
+   degradation the JEPA family is the most accurate of all models (JEPA+Bio
+   within ~1% of its unconstrained ablation), and its relative degradation at
+   75% (+85%) is far below HGB's (+96%); GRU is the closest competitor (+75%)
+   with worse absolute error.
+3. **Honest losses**: HGB keeps CDR-SB (best at 24 mo, significantly better
+   pooled); Ridge keeps conversion AUC.
 
 Full tables, significance details, and limitations:
 **[docs/RESULTS.md](docs/RESULTS.md)**.
@@ -61,15 +63,12 @@ The rule engine is verified for **implementation consistency** against a
 synthetic Alzheimer cascade with known ground truth (**11/11 tests**,
 including two regression tests added after external review: rules constrain
 the *prediction* — not gated by future ground truth — and R3 operates on
-*unique patients* with observed cells only). These tests validate the code
+*unique patients* with observed cells only). Compliant trajectories incur
+≈ 0 penalty; unsupported decline, pathology reversal, and anti-causal
+ordering are flagged with >10× margin. These tests validate the code
 against its own pre-specified rules; they do not validate the rules as
 clinical causal truth.
 See **[docs/BIOLOGICAL_RULES.md](docs/BIOLOGICAL_RULES.md)**.
-
-The rule engine itself is verified against a synthetic Alzheimer cascade with
-known ground truth (11/11 tests): compliant trajectories ≈ 0 penalty; unsupported
-decline, pathology reversal, and anti-causal ordering are flagged with >10×
-margin. See **[docs/BIOLOGICAL_RULES.md](docs/BIOLOGICAL_RULES.md)**.
 
 ## Quickstart
 

@@ -223,7 +223,6 @@ class BioJEPA2(nn.Module):
             losses["sup_current"] = masked_mse(cur_dyn, dyn_i, mask_i)
             losses["sup_future"] = masked_mse(pred_dyn, dyn_j, mask_j)
             pred_abs = pred_dyn
-            total_extra_sup = losses["sup_current"]
 
         total = w_lat * losses["latent"] + w_std * losses["std_reg"] + w_cov * losses["cov_reg"] \
             + w_sup * (losses["sup_future"] + losses.get("sup_current", 0.0))
