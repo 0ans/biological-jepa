@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "biojepa"
+version = "0.3.0"
+description = "Biologically-constrained JEPA for disease progression"
+requires-python = ">=3.10"
+dependencies = ["torch", "pandas", "numpy", "scikit-learn", "matplotlib", "pyreadr"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

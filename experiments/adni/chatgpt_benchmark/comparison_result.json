@@ -1,0 +1,18 @@
+{
+ "n_patients": 6,
+ "mae_ours": {
+  "MMSE": 2.55,
+  "ADAS13": 7.64,
+  "CDRSB": 1.39,
+  "overall": 3.79
+ },
+ "mae_gpt": {
+  "MMSE": 2.5,
+  "ADAS13": 5.56,
+  "CDRSB": 1.22,
+  "overall": 3.05
+ },
+ "conversion_ours": "4/6",
+ "conversion_gpt": "3/6",
+ "note": "n=6 demonstration, not a statistical benchmark"
+}

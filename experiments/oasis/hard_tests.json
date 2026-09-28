@@ -1,0 +1,99 @@
+{
+  "stress_mae": {
+    "jepa_v2_bio": {
+      "0.00": 0.8134458810091019,
+      "0.25": 0.9230637575189272,
+      "0.50": 1.047127904991309,
+      "0.75": 1.0683934390544891
+    },
+    "jepa_v2": {
+      "0.00": 0.7113888462384542,
+      "0.25": 0.8034198905030886,
+      "0.50": 0.9113384683926901,
+      "0.75": 0.9079661344488462
+    },
+    "gru": {
+      "0.00": 0.5243619171281656,
+      "0.25": 0.6962346968551477,
+      "0.50": 0.8889939859509468,
+      "0.75": 0.9820940693219503
+    },
+    "ridge": {
+      "0.00": 0.7402302746971449,
+      "0.25": 0.9735806336005529,
+      "0.50": 1.2084610039989154,
+      "0.75": 1.2989424268404643
+    },
+    "hgb": {
+      "0.00": 1.0180665453275044,
+      "0.25": 1.6651114200552304,
+      "0.50": 2.1898802667856216,
+      "0.75": 2.5608203262090683
+    }
+  },
+  "rollout": {
+    "jepa_v2_bio": {
+      "rollout_mae_MMSE_step1": 2.4285659790039062,
+      "rollout_mae_CDR_step1": 0.24094341695308685,
+      "rollout_mae_nWBV_step1": 0.027270585298538208,
+      "rollout_capacity_violation_rate": {
+        "step1": 0.22727272727272727,
+        "step2": 0.25,
+        "step3": 0.3181818181818182
+      },
+      "rollout_monotonic_violation_rate": {
+        "step1": 0.18181818181818182,
+        "step2": 0.0,
+        "step3": 0.0
+      },
+      "rollout_mae_MMSE_step2": 1.9462580680847168,
+      "rollout_mae_CDR_step2": 0.24067892134189606,
+      "rollout_mae_nWBV_step2": 0.013606464490294456,
+      "rollout_mae_MMSE_step3": 0.7663981318473816,
+      "rollout_mae_CDR_step3": 0.21492183208465576,
+      "rollout_mae_nWBV_step3": 0.015645146369934082
+    },
+    "jepa_v2": {
+      "rollout_mae_MMSE_step1": 1.8210945129394531,
+      "rollout_mae_CDR_step1": 0.258152574300766,
+      "rollout_mae_nWBV_step1": 0.029415935277938843,
+      "rollout_capacity_violation_rate": {
+        "step1": 0.22727272727272727,
+        "step2": 0.2727272727272727,
+        "step3": 0.3409090909090909
+      },
+      "rollout_monotonic_violation_rate": {
+        "step1": 0.22727272727272727,
+        "step2": 0.0,
+        "step3": 0.0
+      },
+      "rollout_mae_MMSE_step2": 1.7780389785766602,
+      "rollout_mae_CDR_step2": 0.25499892234802246,
+      "rollout_mae_nWBV_step2": 0.015029871836304665,
+      "rollout_mae_MMSE_step3": 1.0684140920639038,
+      "rollout_mae_CDR_step3": 0.21261368691921234,
+      "rollout_mae_nWBV_step3": 0.01618713140487671
+    },
+    "gru": {
+      "rollout_mae_MMSE_step1": 0.5525217056274414,
+      "rollout_mae_CDR_step1": 0.1550353765487671,
+      "rollout_mae_nWBV_step1": 0.017308920621871948,
+      "rollout_capacity_violation_rate": {
+        "step1": 0.2727272727272727,
+        "step2": 0.5,
+        "step3": 0.5227272727272727
+      },
+      "rollout_monotonic_violation_rate": {
+        "step1": 0.0,
+        "step2": 0.0,
+        "step3": 0.0
+      },
+      "rollout_mae_MMSE_step2": 2.0467936992645264,
+      "rollout_mae_CDR_step2": 0.24711188673973083,
+      "rollout_mae_nWBV_step2": 0.013506223447620869,
+      "rollout_mae_MMSE_step3": 2.9995625019073486,
+      "rollout_mae_CDR_step3": 0.3344838619232178,
+      "rollout_mae_nWBV_step3": 0.02001810073852539
+    }
+  }
+}
