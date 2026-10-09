@@ -9,7 +9,8 @@ from .utils import seed_everything
 
 def train_jepa(prepared, device=torch.device("cpu"), seed: int = 0, epochs: int = 400,
                lr: float = 3e-3, batch: int = 256, patience: int = 60,
-               w_bio: float = 0.0, ema_momentum: float = 0.99, version: str = "v2"):
+               w_bio: float = 0.0, ema_momentum: float = 0.99, version: str = "v2",
+               w_lat: float = 1.0):
     seed_everything(seed)
     study = prepared.study
     model = build_model(version, in_dim=prepared.in_dim, step_dim=prepared.step_dim,
@@ -29,10 +30,10 @@ def train_jepa(prepared, device=torch.device("cpu"), seed: int = 0, epochs: int 
             return model.loss(b["seq_i"], b["len_i"], b["seq_j"], b["len_j"], b["ctx"],
                               b["dt_feat"], b["dyn_j"], b["mask_j"], b["dyn_i"], b["mask_i"],
                               rule_engine=prepared.engine, severity=b["severity"],
-                              dt=b["dt"], w_bio=w_b, patient_ids=pids)
+                              dt=b["dt"], w_bio=w_b, w_lat=w_lat, patient_ids=pids)
         return model.loss(b["x_i"], b["x_j"], b["dt_feat"], b["dyn_j"], b["mask_j"],
                           b["dyn_i"], b["mask_i"], rule_engine=prepared.engine,
-                          severity=b["severity"], dt=b["dt"], w_bio=w_b)
+                          severity=b["severity"], dt=b["dt"], w_bio=w_b, w_lat=w_lat)
 
     best_val, best_state, wait = float("inf"), None, 0
     for epoch in range(epochs):
