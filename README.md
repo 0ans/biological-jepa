@@ -1,14 +1,21 @@
 # biological-jepa
 
-**Disease progression modeling with a biologically-constrained JEPA — from
-recognition to reasoning.**
+> **Research status (October 2026):** Experimental JEPA-style supervised temporal
+> forecasting; this is not a clinically validated or causal disease model.
+> The original supervised GRU baseline did **not** receive the requested
+> prediction horizon. This has now been corrected in code, including rollout.
+> **Previously published GRU comparison metrics are historical and must be
+> regenerated before citing any superiority claim.** See
+> [research evaluation protocol](docs/RESEARCH_PROTOCOL.md).
 
-Medical AI today labels a scan; it does not reason about how the disease will
-move. This project implements and tests the idea that a JEPA
-(Joint-Embedding Predictive Architecture) trained to predict the *latent*
-future state of a patient — and penalized whenever its predicted trajectory
-violates known biology — produces disease trajectories that are more
-biologically plausible than standard pattern-matching models.
+
+**Longitudinal disease progression prediction with a JEPA-inspired latent predictor
+and optional biological regularization.**
+
+This research prototype tests whether predicting a learned *future patient
+representation*, alongside supervised clinical forecasting, improves
+out-of-patient predictions. Soft biomedical penalties encode assumptions, not
+proof of biological mechanisms or causal reasoning.
 
 Evaluated on **real longitudinal data**: an ADNI sample (2,347 participants,
 ~9,300 training trajectories, baseline amyloid/tau/hippocampal markers,
@@ -20,14 +27,12 @@ ground truth for rule verification.
 
 ![Architecture](docs/architecture.png)
 
-Why latent prediction: raw-value prediction forces the model to also model
-measurement noise, scanner variation, and missing-entry artifacts — the "messy
-and often missing" reality of medical data. Predicting in representation
-space lets unpredictable detail dissolve and keeps the disease trajectory as
-the learning target. The biological penalty then shapes *what trajectories*
-the model is allowed to imagine: an effect requires a cause.
+**Hypothesis:** latent prediction may reduce sensitivity to noise and
+missingness. This requires a controlled ablation against an identical model
+without the latent objective. Lower biological-rule violations indicate
+agreement with the programmed constraints, not demonstrated causality.
 
-## Headline results (ADNI, 5-fold subject-level CV × 3 seeds, patient-level inference)
+## Historical results (ADNI, 5-fold subject-level CV × 3 seeds; GRU rerun pending)
 
 | | JEPA-v2 | **JEPA-v2+Bio** | GRU | HGB | Ridge | Carry-fwd |
 |---|---|---|---|---|---|---|
