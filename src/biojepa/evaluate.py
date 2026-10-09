@@ -315,7 +315,9 @@ def gru_rollout(model, prepared, split: str, device=torch.device("cpu"),
     dt = np.array([p["dt"] for p in pairs])
     sev = prepared.severity[split]
 
-    seqs, lengths = gru_collate(study, pairs, lambda s: prepared.dyn_by_subject[s],
+    # One-year horizon for each rollout step, independently of test pair dt.
+    rollout_pairs = [{**p, "dt": 1.0} for p in pairs]
+    seqs, lengths = gru_collate(study, rollout_pairs, lambda s: prepared.dyn_by_subject[s],
                                 prepared.x_context)
     seqs = np.concatenate([seqs, np.zeros((len(pairs), steps, seqs.shape[2]), dtype=np.float32)], axis=1)
     lens = lengths.copy()
@@ -328,8 +330,9 @@ def gru_rollout(model, prepared, split: str, device=torch.device("cpu"),
             step_preds.append(pred)
             # append predicted visit as new step with mask=1, gap=1 year, real context
             ctx_part = np.stack([prepared.x_context[p["subject"]] for p in pairs]).astype(np.float32)
+            year_features = fourier_time(np.ones(len(pairs)))
             step_vec = np.concatenate([pred, np.ones((len(pairs), D), dtype=np.float32),
-                                       fourier_time(np.ones(len(pairs))), ctx_part], axis=1)
+                                       year_features, year_features, ctx_part], axis=1)
             seqs[np.arange(len(pairs)), lens, :] = step_vec
             lens = lens + 1
 

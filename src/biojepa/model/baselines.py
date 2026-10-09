@@ -6,9 +6,9 @@
 - gru           : supervised sequence model (GRU) consuming the visit history
                   up to time t and directly regressing future raw-value levels.
 
-All baselines predict the future clinical values directly (in raw or
-standardized space) — exactly the "pattern-matching" family the proposal
-argues against; the biological rules are absent by design.
+These supervised baselines directly predict future clinical values. The GRU
+receives the same requested future horizon as JEPA and tabular baselines;
+these baselines do not use biological penalties.
 """
 from __future__ import annotations
 
@@ -125,18 +125,25 @@ class HGBBaseline:
 
 # --------------------------------------------------------------- GRU wrapper
 def gru_collate(study, pairs, dyn_std_lookup, x_static, dt_dim=8, max_len=None):
-    """Build padded per-pair sequences (visits 0..i) + static/patho context."""
+    """Build observed history, context and requested future horizon.
+
+    pair["dt"] is measured in years and is known at inference time.
+    """
     B = len(pairs)
     D = len(study.dyn_specs)
     ctx_dim = x_static.shape[1]
     L = max_len or max(p["i"] + 1 for p in pairs)
     L = max(L, max(p["i"] + 1 for p in pairs))  # never truncate histories
-    seq_dyn = np.zeros((B, L, 2 * D + dt_dim + ctx_dim), dtype=np.float32)
+    seq_dyn = np.zeros((B, L, 2 * D + 2 * dt_dim + ctx_dim), dtype=np.float32)
     lengths = np.zeros(B, dtype=np.int64)
     for b, pair in enumerate(pairs):
         s_idx, i = pair["subject"], pair["i"]
         dyn_std = dyn_std_lookup(s_idx)
         s = study.subjects[s_idx]
+        horizon = float(pair["dt"])
+        if not np.isfinite(horizon) or horizon <= 0:
+            raise ValueError(f"Forecast gap must be positive and finite, got {horizon}")
+        horizon_f = fourier_time(np.array([horizon]), dt_dim // 2)[0]
         prev_t = None
         for t, visit_t in enumerate(s.times[: i + 1]):
             gap = 0.0 if prev_t is None else visit_t - prev_t
@@ -144,7 +151,7 @@ def gru_collate(study, pairs, dyn_std_lookup, x_static, dt_dim=8, max_len=None):
             vals = np.nan_to_num(dyn_std[t])
             dt_f = fourier_time(np.array([max(gap, 1e-3)]), dt_dim // 2)[0]
             ctx = x_static[s_idx]
-            seq_dyn[b, t] = np.concatenate([vals, mask, dt_f, ctx])
+            seq_dyn[b, t] = np.concatenate([vals, mask, dt_f, horizon_f, ctx])
             prev_t = visit_t
         lengths[b] = i + 1
     return seq_dyn, lengths
@@ -156,7 +163,7 @@ def train_gru(study, train_pairs, val_pairs, dyn_std_lookup, x_static,
     seed_everything(seed)
     D = len(study.dyn_specs)
     dt_dim = 8
-    model = GRUProg(step_dim=2 * D + dt_dim + x_static.shape[1], n_dyn=D).to(device)
+    model = GRUProg(step_dim=2 * D + 2 * dt_dim + x_static.shape[1], n_dyn=D).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
 
     tr_seq, tr_len = gru_collate(study, train_pairs, dyn_std_lookup, x_static, dt_dim)
