@@ -27,7 +27,7 @@ from biojepa.train import train_jepa
 
 
 def run(study_name="synthetic", seeds=(0, 1), folds=3, epochs=50,
-        output="experiments/repeated_ablation.json", target="MMSE", horizon=1.0):
+        output="experiments/repeated_ablation.json", target=None, horizon=1.0):
     if not seeds or len(set(seeds)) != len(seeds):
         raise ValueError("Provide at least one unique seed")
     if folds < 2 or epochs < 1:
@@ -41,6 +41,8 @@ def run(study_name="synthetic", seeds=(0, 1), folds=3, epochs=50,
     else:
         raise ValueError("Unknown dataset")
     features = [s.name for s in study.dyn_specs]
+    if target is None:
+        target = "MMSE_like" if study_name == "synthetic" else "MMSE"
     if target not in features:
         raise ValueError(f"Feature {target} absent; available: {features}")
     feature = features.index(target)
@@ -107,7 +109,7 @@ def main():
     parser.add_argument("--seeds", nargs="+", type=int, default=[0, 1])
     parser.add_argument("--folds", type=int, default=3)
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--target", default="MMSE")
+    parser.add_argument("--target", default=None)
     parser.add_argument("--horizon", type=float, default=1.)
     parser.add_argument("--output", default="experiments/repeated_ablation.json")
     args = parser.parse_args()
