@@ -1,157 +1,94 @@
-# biological-jepa
+# Biological JEPA
 
-> **Research status (October 2026):** Experimental JEPA-style supervised temporal
-> forecasting; this is not a clinically validated or causal disease model.
-> The original supervised GRU baseline did **not** receive the requested
-> prediction horizon. This has now been corrected in code, including rollout.
-> **Previously published GRU comparison metrics are historical and must be
-> regenerated before citing any superiority claim.** See
-> [research evaluation protocol](docs/RESEARCH_PROTOCOL.md).
+**A research prototype for forecasting longitudinal Alzheimer's disease measurements through future latent representations.**
 
+> **Research status — October 2026:** Code and exploratory results are available. This is **not** a clinically validated system. Historical baseline numbers require rerunning after the October 2026 GRU forecast-horizon correction. No new benchmark result is claimed in this release.
 
-**Longitudinal disease progression prediction with a JEPA-inspired latent predictor
-and optional biological regularization.**
+## Why this project exists
 
-This research prototype tests whether predicting a learned *future patient
-representation*, alongside supervised clinical forecasting, improves
-out-of-patient predictions. Soft biomedical penalties encode assumptions, not
-proof of biological mechanisms or causal reasoning.
+Clinical records contain irregular follow-up visits, missing measurements, and uncertain trajectories. This project tests one precise hypothesis: **does a learned future-patient representation improve longitudinal clinical prediction beyond a matched, supervised model without a latent objective?**
 
-Evaluated on **real longitudinal data**: an ADNI sample (2,347 participants,
-~9,300 training trajectories, baseline amyloid/tau/hippocampal markers,
-longitudinal MMSE/ADAS13/CDR-SB, conversion labels) and OASIS-2
-(150 subjects, 373 visits), with a synthetic Alzheimer cascade used as
-ground truth for rule verification.
+The project combines a temporal context encoder, a forecast-horizon-conditioned latent predictor, an EMA target encoder used during training, a clinical regression head and optional soft biomedical constraints. These rules express assumptions; they do **not** establish causal disease mechanisms.
 
-## The idea in one figure
+## Architecture
 
-![Architecture](docs/architecture.png)
+![Model architecture: encoder, latent predictor, training-only EMA target and clinical head](docs/architecture.svg)
 
-**Hypothesis:** latent prediction may reduce sensitivity to noise and
-missingness. This requires a controlled ablation against an identical model
-without the latent objective. Lower biological-rule violations indicate
-agreement with the programmed constraints, not demonstrated causality.
+**During training:** the history encoder summarizes visits up to time t. The latent predictor forecasts a future embedding, trained against a no-gradient EMA target from observed future history. A clinical head predicts future MMSE / ADAS13 / CDR-SB, with optionally penalized violations of programmed constraints.
 
-## Historical results (ADNI, 5-fold subject-level CV × 3 seeds; GRU rerun pending)
+**During inference:** only observed patient history, forecast horizon, encoder, predictor and clinical head are used. Future observations and the target encoder are not required.
 
-| | JEPA-v2 | **JEPA-v2+Bio** | GRU | HGB | Ridge | Carry-fwd |
-|---|---|---|---|---|---|---|
-| MMSE MAE @12 mo ↓ | 1.530 | **1.517** (λ2: 1.518) | 1.577 | 1.545 | 1.599 | 1.696 |
-| CDR-SB MAE @36 mo ↓ | 1.222 | 1.196 (λ2: 1.206) | **1.201** | 1.202 | 1.298 | 1.408 |
-| bio-penalty ablation (patient-level permutation) | — | **ADAS13 p=0.0025 ✓ (survives Bonferroni)** · CDRSB p=0.0001 ✓ · MMSE p=0.34 | | | | |
-| MAE at 75% input degradation ↓ | 3.99 | 4.08 | **3.98** | 4.43 | 4.12 | — |
+[Editable architecture SVG](docs/architecture.svg) · [Implementation](src/biojepa/model/jepa.py) · [Biological rule specification](docs/BIOLOGICAL_RULES.md)
 
-**Conversion AUC — two different measurements, never mixed:**
-- 15-run CV aggregate (mixed follow-up windows): JEPA+Bio 0.683 — Ridge
-  leads this metric (0.725).
-- Single held-out fold, prospective design (baseline input, fixed 36-month
-  window, time-under-risk labels, n=141): JEPA+Bio λ2 **0.952** vs GRU 0.927
-  vs HGB 0.935 — a hard-test result, NOT a CV aggregate.
+## Evidence, clearly separated
 
-Three honest statements:
+| Status | What it means |
+|---|---|
+| Implemented | History-aware JEPA-inspired architecture, supervised clinical head, biological penalties and baselines |
+| Tested in code | Synthetic rule-engine checks and automated unit/smoke tests |
+| Historical only | ADNI-derived and OASIS-2 aggregate results produced **before** the GRU comparison correction |
+| Still required | Fair baseline reruns, latent-loss ablation across independent patient splits, patient-level confidence intervals and external validation |
 
-1. **The biological constraints help on 2 of 3 clinical scales** (ADAS13 and
-   CDR-SB survive full Bonferroni correction at the patient level; MMSE does
-   not — the earlier pair-level p=0.0002 was inflated and is superseded).
-2. **Robustness to missing data is the structural win**: at 25-50% input
-   degradation the JEPA family is the most accurate of all models (JEPA+Bio
-   within ~1% of its unconstrained ablation), and its relative degradation at
-   75% (+85%) is far below HGB's (+96%); GRU is the closest competitor (+75%)
-   with worse absolute error.
-3. **Honest losses**: HGB keeps CDR-SB (best at 24 mo, significantly better
-   pooled); Ridge keeps conversion AUC.
+The archived numbers in [RESULTS.md](docs/RESULTS.md) remain available for traceability. **They must not be cited as evidence that this model outperforms a correctly time-conditioned GRU.** Original code and stored artifact lineage should accompany any formal reproduction.
 
-Full tables, significance details, and limitations:
-**[docs/RESULTS.md](docs/RESULTS.md)**.
+## Evaluation protocol
 
-The rule engine is verified for **implementation consistency** against a
-synthetic Alzheimer cascade with known ground truth (**11/11 tests**,
-including two regression tests added after external review: rules constrain
-the *prediction* — not gated by future ground truth — and R3 operates on
-*unique patients* with observed cells only). Compliant trajectories incur
-≈ 0 penalty; unsupported decline, pathology reversal, and anti-causal
-ordering are flagged with >10× margin. These tests validate the code
-against its own pre-specified rules; they do not validate the rules as
-clinical causal truth.
-See **[docs/BIOLOGICAL_RULES.md](docs/BIOLOGICAL_RULES.md)**.
+![Six-step publication-grade validation plan](docs/validation_protocol.svg)
 
-## Quickstart
+A fair test needs: disjoint patient splits, transformations fit only to training patients, matched horizon-conditioned baselines, controlled ablations, uncertainty at patient level and an independent external cohort.
+
+[Full research protocol](docs/RESEARCH_PROTOCOL.md) · [Editable validation graphic](docs/validation_protocol.svg)
+
+## Reproduce the research pipeline
+
+Requires Python 3.10+ and project dependencies. Datasets are not included.
 
 ```bash
-git clone https://github.com/0ans/biological-jepa.git && cd biological-jepa
-make setup          # venv + torch/pandas/sklearn
-make data           # downloads & verifies both real datasets (checksums printed)
-make test           # 11 unit tests incl. rule-engine vs ground truth
-make experiments    # 8 models × 15 runs × 2 studies + hard tests (~45 min on a laptop)
+git clone https://github.com/0ans/biological-jepa.git
+cd biological-jepa
+make setup
+make test
 ```
 
-Try it on a patient (trains in ~40 s, then predicts the 3-year trajectory):
+Run the *exploratory*, same-architecture latent-loss ablation on synthetic data:
 
 ```bash
-python scripts/predict_patient.py                 # 3 held-out patients
-python scripts/predict_patient.py --sid ADNI_77   # a specific held-out patient
+./.venv/bin/python scripts/latent_ablation.py --study synthetic --seed 0
 ```
 
-Results land in `experiments/{adni,oasis}/`: `results.json` (15-run CV +
-significance), `hard_tests.json` (missingness stress + rollout), and figures.
-See [experiments/README.md](experiments/README.md) for a map of every artifact.
+The script compares the same v2 architecture with latent loss coefficient 0 versus 1. **One split is not confirmatory evidence.** The full evaluation requires repeated patient-disjoint experiments with appropriately paired uncertainty estimates.
 
-## Repository layout
+To run full dataset benchmarks, first review [ADNI access](docs/ADNI_ACCESS.md), verify permissions and local inputs, then use `make data` and `make experiments`. Training runtime depends on compute environment.
 
-```
-src/biojepa/
-├── data/            adni.py · oasis.py · synthetic.py · dataset.py (splits, K-fold, pairs, masks)
-├── model/
-│   ├── jepa.py      v1 snapshot encoder · v2 history encoder · EMA target · VICReg · latent rollout
-│   ├── bio_rules.py differentiable rule engine (R1 capacity, R2 monotonicity, R3 ordering)
-│   └── baselines.py carry-forward · ridge · HGB · supervised GRU
-├── pipeline.py      train-fit standardizers, per-pair tensors, capacity calibration
-├── train.py · evaluate.py (bootstrap · stress · rollout) · run_experiments.py
-docs/                RESULTS · RESEARCH_LOG (incl. failures) · BIOLOGICAL_RULES · ADNI_ACCESS
-experiments/         committed results.json + hard_tests.json + figures (evidence)
-tests/               rule-engine ground-truth tests + end-to-end smoke
-```
+## Publication materials
 
-## Data & ethics
+- [Research manuscript draft](paper/MANUSCRIPT.md) — structured background, methods, limitations and explicit reporting status
+- [Scientific submission checklist](paper/SUBMISSION_CHECKLIST.md) — remaining experiments, statistical validation and review requirements
+- [Research protocol](docs/RESEARCH_PROTOCOL.md) — comparability, evaluation design and interpretation
+- [Archived results](docs/RESULTS.md) — historical results, not new evidence
+- [Research log](docs/RESEARCH_LOG.md) — design decisions and failed attempts
+- [Experiment artifacts](experiments/README.md) — provenance of stored run outputs
 
-Participant-level data are **not committed**. `scripts/download_data.py`
-fetches the ADNI sample (via the `abaR` R package redistribution) and the
-OASIS-2 longitudinal CSV from public research mirrors, verifies them, and
-prints checksums. For production-grade runs, register at
-[adni.loni.usc.edu](https://adni.loni.usc.edu) (free, DUA) — the loader
-targets the ADNIMERGE schema; see [docs/ADNI_ACCESS.md](docs/ADNI_ACCESS.md).
+## Repository guide
 
-## Honest limitations
-
-- The accessible ADNI sample has baseline-only A/T/N biomarkers, so
-  trajectory-monotonicity rules are verified on the synthetic cascade and
-  applied to OASIS brain volumes; full ADNI activates them on real PET/MRI.
-- HGB remains the single-target accuracy leader (CDR-SB@24/36) and ridge the
-  conversion-AUC leader — JEPA+Bio's demonstrated edge is plausibility, robustness
-  to missing data, and statistically significant accuracy gains over its own
-  unconstrained ablation.
-- OASIS-2 numbers are small-n pipeline validation only.
-
-See [docs/RESEARCH_LOG.md](docs/RESEARCH_LOG.md) for the full honest account,
-including everything that failed along the way.
-
-## Citation
-
-```bibtex
-@software{alharbi2026biologicaljepa,
-  author = {Al-Harbi, Anas},
-  title  = {biological-jepa: biologically-constrained JEPA for disease progression},
-  year   = {2026},
-  url    = {https://github.com/0ans/biological-jepa}
-}
+```text
+src/biojepa/          model, data processing, objectives, evaluation, baselines
+scripts/              data loading, patient inference, latent-loss ablation
+tests/                unit, fairness and smoke tests
+docs/                 transparent protocols, scientific context, SVG figures
+experiments/          historical aggregate results and plots
+paper/                manuscript draft and submission quality gates
+.github/workflows/    automated test checks
 ```
 
-Foundations: JEPA/LeCun et al.; V-JEPA 2 (Assran et al., 2025);
-LeJEPA (Balestriero & LeCun, 2025); AD biomarker cascade (Jack et al., 2010,
-2013, 2016); ADNI and OASIS-2 datasets.
+## Research and clinical limitations
+
+Available ADNI-derived data have restricted longitudinal biomarker coverage, and OASIS-2 is relatively small. Irregular visits and missingness may not be random. Conversion analyses require careful event-time and censoring handling. A low score on **coded** biological rules is not validation of causal biology. This software is not intended for patient care, diagnosis, or treatment decisions.
+
+## Attribution
+
+Cite as research software pending a verified manuscript. Model inspiration includes I-JEPA and VICReg; datasets include ADNI and OASIS-2. Verify bibliographic details and data-use agreements before submission.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
-
----
+MIT — [LICENSE](LICENSE).
