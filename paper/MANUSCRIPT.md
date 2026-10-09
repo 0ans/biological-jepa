@@ -31,6 +31,9 @@ The intended baselines are carry-forward, ridge, histogram gradient boosting and
 ### 2.5 Evaluation design
 Use subject-disjoint train/validation/test splits with normalizers fit to training subjects only. Report per-horizon MMSE, ADAS13 and CDR-SB MAE, 95% patient-bootstrap confidence intervals, counts of *unique patients*, and calibration. Pre-specify a single primary hypothesis and adjust secondary comparisons for multiplicity. Repeated random seeds on overlapping patients do not create independent participant samples. Missingness stress tests should distinguish MCAR from informative missingness. Patient-level conversion tasks require a predeclared baseline index, event definition, follow-up window and censoring handling.
 
+### Planned matched latent-objective evaluation
+The reproducible runner in `scripts/repeated_ablation.py` performs repeated subject-disjoint cross-validation of the same v2 architecture with `w_lat=0` and `w_lat=1`. Per-seed patient-clustered MAE intervals are generated and can be rendered from saved results only using `scripts/plot_ablation.py`. **No new cohort results are reported until the program is actually executed on the authorized data and independently checked.** Seeds reuse individuals and must not be treated as independent cohorts. See `docs/CONTROLLED_ABLATION.md`.
+
 ## 3. Results — preliminary historical record, NOT confirmed after baseline correction
 The original README reported JEPA-v2+Bio MMSE MAE@12mo of 1.517 and CDR-SB MAE@36mo of 1.196 in an ADNI-derived sample. These figures come from the historical repository record, not a new analysis. Relative superiority cannot be established because the previous supervised GRU comparison lacked time-horizon input. Other historical results (including AUC and rule-violation metrics) likewise need protocol scrutiny, prospective re-evaluation, and independent replication. No new p-values or confidence intervals are reported here.
 
