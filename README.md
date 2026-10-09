@@ -25,14 +25,23 @@ ground truth for rule verification.
 
 ## The idea in one figure
 
-![Architecture](docs/architecture.png)
+![Editable research architecture](docs/architecture.svg)
+
+**Publication package:** [manuscript draft](paper/MANUSCRIPT.md) · [evaluation protocol](docs/RESEARCH_PROTOCOL.md) · [figure source](docs/architecture.svg) · [publication checklist](paper/SUBMISSION_CHECKLIST.md).
 
 **Hypothesis:** latent prediction may reduce sensitivity to noise and
 missingness. This requires a controlled ablation against an identical model
 without the latent objective. Lower biological-rule violations indicate
 agreement with the programmed constraints, not demonstrated causality.
 
-## Historical results (ADNI, 5-fold subject-level CV × 3 seeds; GRU rerun pending)
+## Archived results — pre-correction comparison (NOT publication-ready)
+
+**Do not cite cross-model superiority from this table.** The historical GRU
+baseline omitted prediction horizon and the updated implementation has not
+been fully rerun. The table is preserved solely for auditability; not a
+current verified leaderboard.
+
+### Historical results (ADNI, 5-fold subject-level CV × 3 seeds; GRU rerun pending)
 
 | | JEPA-v2 | **JEPA-v2+Bio** | GRU | HGB | Ridge | Carry-fwd |
 |---|---|---|---|---|---|---|
@@ -82,7 +91,8 @@ git clone https://github.com/0ans/biological-jepa.git && cd biological-jepa
 make setup          # venv + torch/pandas/sklearn
 make data           # downloads & verifies both real datasets (checksums printed)
 make test           # 11 unit tests incl. rule-engine vs ground truth
-make experiments    # 8 models × 15 runs × 2 studies + hard tests (~45 min on a laptop)
+make experiments    # subject-level evaluation (runtime varies by hardware)
+python scripts/latent_ablation.py --study synthetic # exploratory JEPA-loss test
 ```
 
 Try it on a patient (trains in ~40 s, then predicts the 3-year trajectory):
@@ -134,6 +144,15 @@ targets the ADNIMERGE schema; see [docs/ADNI_ACCESS.md](docs/ADNI_ACCESS.md).
 
 See [docs/RESEARCH_LOG.md](docs/RESEARCH_LOG.md) for the full honest account,
 including everything that failed along the way.
+
+## Scientific claims and review status
+
+This repository is an **experimental forecasting prototype**. The model's
+behavior has not established clinical safety, causality, robust out-of-cohort
+prediction, or a JEPA-specific performance gain. A reproducible supervised
+vs latent-objective ablation is available via
+[`scripts/latent_ablation.py`](scripts/latent_ablation.py), but multi-seed
+subject-level and independent cohort results are required.
 
 ## Citation
 
