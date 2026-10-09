@@ -27,6 +27,8 @@ ground truth for rule verification.
 
 ![Editable research architecture](docs/architecture.svg)
 
+![Evaluation and validation workflow](docs/validation_protocol.svg)
+
 **Publication package:** [manuscript draft](paper/MANUSCRIPT.md) · [evaluation protocol](docs/RESEARCH_PROTOCOL.md) · [figure source](docs/architecture.svg) · [publication checklist](paper/SUBMISSION_CHECKLIST.md).
 
 **Hypothesis:** latent prediction may reduce sensitivity to noise and
