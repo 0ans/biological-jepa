@@ -6,3 +6,7 @@ __pycache__/
 !data/.gitkeep
 .DS_Store
 *.egg-info/
+
+# May include research cohort-level patient identifiers: never commit.
+experiments/repeated_ablation.json
+experiments/repeated_ablation.png

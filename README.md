@@ -60,6 +60,10 @@ The script compares the same v2 architecture with latent loss coefficient 0 vers
 
 To run full dataset benchmarks, first review [ADNI access](docs/ADNI_ACCESS.md), verify permissions and local inputs, then use `make data` and `make experiments`. Training runtime depends on compute environment.
 
+### Repeated controlled experiment
+
+Run `python scripts/repeated_ablation.py --study synthetic --seeds 0 1 --folds 3 --epochs 50` for an exploratory patient-disjoint repeated comparison; after it finishes, `python scripts/plot_ablation.py` plots the **computed** patient-bootstrap intervals. For authorized real-data runs, see [the controlled ablation protocol](docs/CONTROLLED_ABLATION.md). Per-patient outputs are gitignored and must not be published without permission.
+
 ## Publication materials
 
 - [Research manuscript draft](paper/MANUSCRIPT.md) — structured background, methods, limitations and explicit reporting status
