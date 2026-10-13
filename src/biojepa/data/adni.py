@@ -5,6 +5,12 @@ study in ADNIMERGE-style long format (one row per subject visit), as
 redistributed with the `abaR` R package (ncullen93/abaR, processed from
 ADNI's ADNIMERGE table). Provenance and access terms: see docs/ADNI_ACCESS.md.
 
+Schema note: the column names below (YEARS_bl, GENDER, EDUCATION,
+CSF_ABETA_bl, PET_ABETA_STATUS_bl, ConvertedToDementia, TimeUnderRiskDementia,
+...) are the abaR-processed names. The official LONI ADNIMERGE table uses
+different names and units and has no ready-made conversion or amyloid-status
+columns, so it needs an explicit mapping step before this loader can read it.
+
 Because biomarkers in this sample are baseline-only, the modeling task is the
 canonical ADNI progression-prediction setup: baseline pathology (amyloid A,
 tau T, neurodegeneration N) + current clinical state -> future clinical
@@ -32,6 +38,8 @@ _DYN_COLS = ["MMSE", "ADAS13", "CDRSB"]
 _PATHO_COLS = ["CSF_ABETA_bl", "PET_ABETA_bl", "CSF_TAU_bl", "CSF_PTAU_bl", "MRI_HIPP_bl"]
 _STATUS_COLS = ["PET_ABETA_STATUS_bl", "CSF_ABETA_STATUS_bl"]
 _STATIC_COLS = ["AGE", "GENDER", "EDUCATION", "APOE4"]
+# baseline diagnoses that already mean dementia (ADNIMERGE coding)
+DEMENTIA_BASELINE_GROUPS = {"AD", "Dementia"}
 
 
 def load_adni(path: str = DATA_PATH) -> Study:
@@ -64,6 +72,13 @@ def load_adni(path: str = DATA_PATH) -> Study:
             static = g[_STATIC_COLS].iloc[0].to_numpy(dtype=np.float32)
             patho = g[_PATHO_COLS].iloc[0].to_numpy(dtype=np.float32)
             status = g[_STATUS_COLS].iloc[0].fillna(-1).to_numpy(dtype=np.float32)
+            dx_bl = str(g["DX_bl"].iloc[0])
+            conv_raw = float(g["ConvertedToDementia"].iloc[0])
+            tur_raw = float(g["TimeUnderRiskDementia"].iloc[0])
+            # a missing conversion flag means the outcome is unknown, not
+            # "did not convert": timing is then left undetermined so the
+            # subject is excluded from conversion analyses
+            known = np.isfinite(conv_raw) and np.isfinite(tur_raw)
             subjects.append(Subject(
                 sid=f"ADNI_{int(rid)}",
                 times=times,
@@ -71,10 +86,10 @@ def load_adni(path: str = DATA_PATH) -> Study:
                 static=static,
                 patho=patho,
                 patho_status=status,
-                group=str(g["DX_bl"].iloc[0]),
-                converts=bool(g["ConvertedToDementia"].iloc[0] > 0),
-                time_under_risk=float(g["TimeUnderRiskDementia"].iloc[0])
-                if np.isfinite(g["TimeUnderRiskDementia"].iloc[0]) else None,
+                group=dx_bl,
+                converts=bool(np.isfinite(conv_raw) and conv_raw > 0),
+                time_under_risk=tur_raw if known else None,
+                dementia_at_baseline=dx_bl in DEMENTIA_BASELINE_GROUPS,
             ))
     return Study(
         name="adni",

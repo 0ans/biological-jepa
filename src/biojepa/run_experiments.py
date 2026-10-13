@@ -1,32 +1,37 @@
-"""Full experiment suite v2 — harder evaluation throughout:
+"""Full experiment suite:
 
-  - 5-fold subject-level cross-validation x 3 seeds (15 runs per model)
+  - k-fold subject-level cross-validation x seeds (default 5 x 3)
   - 8 model configs incl. gradient boosting and two JEPA generations
-  - paired bootstrap significance on primary-feature errors and conversion AUC
-  - missingness stress test (input measurements dropped 25/50/75%)
-  - multi-step rollout evaluation (trajectory error accumulation + violations)
+  - patient-level paired inference: each patient's errors are first averaged
+    over seeds, then patients are the resampling / sign-flip unit
+    (repeated seeds on the same patients are NOT independent samples)
+  - prospective conversion discrimination (baseline index, fixed window,
+    time-aware labels, baseline dementia excluded)
+  - missingness stress test and multi-step rollouts scored identically for
+    every model
 
-Usage:  python -m biojepa.run_experiments [--study adni|oasis|both] [--seeds 0 1 2]
+Usage:  python -m biojepa.run_experiments --study adni|oasis|both|synthetic
+        [--seeds 0 1 2] [--folds 5] [--device cpu|auto] [--max-epochs N]
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import platform
+import subprocess
 import time
+from collections import defaultdict
 
 import numpy as np
 import torch
 
-from .data.adni import load_adni
 from .data.dataset import subject_kfold
-from .data.oasis import load_oasis
-from .evaluate import (degraded_dyn_lookup, evaluate_predictions, gru_predict,
-                       gru_predict_degraded, gru_rollout, jepa_predict,
-                       jepa_predict_degraded, jepa_rollout, cluster_paired_bootstrap,
-                       paired_auc_bootstrap, ridge_predict)
-from .model.baselines import (HGBBaseline, RidgeBaseline, carry_forward_predict,
-                              train_gru)
+from .evaluate import (cluster_paired_bootstrap, conversion_analysis, degraded_dyn_lookup,
+                       evaluate_predictions, forecast, gru_rollout, jepa_rollout,
+                       paired_auc_bootstrap)
+from .model.baselines import HGBBaseline, RidgeBaseline, ridge_design_matrix, train_gru
 from .pipeline import prepare
 from .train import train_jepa
 
@@ -43,245 +48,362 @@ MODEL_CONFIGS = {
 MODEL_NAMES = list(MODEL_CONFIGS)
 FIG_LABELS = ["Carry\nfwd", "Ridge", "HGB", "GRU", "JEPA\nv1", "JEPA\nv2",
               "JEPA v2\n+Bio", "JEPA v2\n+Bio(λ2)"]
-PRIMARY_FEATURES = {"adni": ["MMSE", "CDRSB"], "oasis": ["MMSE", "CDR"]}
-BOOTSTRAP_OPPONENTS = ["jepa_v2", "gru", "ridge", "hgb"]
+# Pre-specified model of interest for every confirmatory comparison. All
+# analyses (main table, clinical tests, demo script) use this one model.
+PRIMARY_MODEL = "jepa_v2_bio"
+COMPARATORS = ["jepa_v2", "gru", "ridge", "hgb"]
+PRIMARY_FEATURES = {"adni": ["MMSE", "CDRSB"], "oasis": ["MMSE", "CDR"],
+                    "synthetic": ["MMSE_like", "CDR_like"]}
+DATA_FILES = {"adni": os.path.join("data", "raw", "adnimerge_sample.rda"),
+              "oasis": os.path.join("data", "raw", "oasis_longitudinal.csv")}
 
 
-def fit_predict(config, prepared, seed: int, device):
-    """Train (if needed) on the prepared split and return standardized test
-    predictions plus the fitted model object (or None)."""
+# ------------------------------------------------------------------ helpers
+def load_study(name: str):
+    if name == "adni":
+        from .data.adni import load_adni
+        return load_adni()
+    if name == "oasis":
+        from .data.oasis import load_oasis
+        return load_oasis()
+    if name == "synthetic":
+        from .data.synthetic import simulate_cascade
+        return simulate_cascade(n_subjects=300, seed=0)
+    raise ValueError(name)
+
+
+def to_jsonable(obj):
+    """Strict-JSON conversion: numpy scalars/arrays -> Python, NaN/inf -> None."""
+    if isinstance(obj, dict):
+        return {str(k): to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [to_jsonable(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return to_jsonable(obj.tolist())
+    if isinstance(obj, (np.bool_, bool)):
+        return bool(obj)
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (float, np.floating)):
+        return float(obj) if np.isfinite(obj) else None
+    return obj
+
+
+def write_json(path: str, obj) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(to_jsonable(obj), f, indent=2, allow_nan=False)
+
+
+def _sha256(path: str) -> str | None:
+    if not os.path.exists(path):
+        return None
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def environment_manifest() -> dict:
+    import sklearn
+    try:
+        commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                                text=True, check=True).stdout.strip()
+        dirty = bool(subprocess.run(["git", "status", "--porcelain"], capture_output=True,
+                                    text=True, check=True).stdout.strip())
+    except Exception:
+        commit, dirty = None, None
+    return {"git_commit": commit, "git_dirty": dirty, "python": platform.python_version(),
+            "torch": torch.__version__, "numpy": np.__version__, "sklearn": sklearn.__version__,
+            "platform": platform.platform(),
+            "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+
+
+def resolve_device(name: str) -> torch.device:
+    if name == "auto":
+        from .utils import get_device
+        return get_device()
+    return torch.device(name)
+
+
+# ---------------------------------------------------------- fit / predict
+def fit_model(config: dict, prepared, seed: int, device, max_epochs: int | None = None):
+    """Train a model on the prepared split (None for carry-forward)."""
     kind = config["kind"]
     if kind == "carry":
-        train_ids = sorted({p["subject"] for p in prepared.pairs["train"]})
-        pred_raw, _, _, _ = carry_forward_predict(prepared.study, prepared.pairs["test"], train_ids)
-        return prepared.dyn_std.transform(pred_raw), None
+        return None
     if kind in ("ridge", "hgb"):
-        from .model.baselines import ridge_design_matrix
         Xtr = ridge_design_matrix(prepared, prepared.pairs["train"])
         Ytr = np.stack([prepared.dyn_by_subject[p["subject"]][p["j"]] for p in prepared.pairs["train"]])
-        Mtr = np.isfinite(Ytr)
         model = RidgeBaseline() if kind == "ridge" else HGBBaseline(random_state=seed)
-        model.fit(Xtr, np.nan_to_num(Ytr), Mtr)
-        return ridge_predict(prepared, "test", model), model
+        model.fit(Xtr, np.nan_to_num(Ytr), np.isfinite(Ytr))
+        return model
+    epoch_kw = {} if max_epochs is None else {"epochs": max_epochs}
     if kind == "gru":
-        model = train_gru(prepared.study, prepared.pairs["train"], prepared.pairs["val"],
-                          lambda s: prepared.dyn_by_subject[s], prepared.x_context,
-                          device=device, seed=seed)
-        return gru_predict(model, prepared, "test", device), model
+        return train_gru(prepared.study, prepared.pairs["train"], prepared.pairs["val"],
+                         lambda s: prepared.dyn_by_subject[s], prepared.x_context,
+                         device=device, seed=seed, **epoch_kw)
     if kind == "jepa":
-        model, best_val, _ = train_jepa(prepared, device=device, seed=seed,
-                                        version=config["version"], w_bio=config["w_bio"])
-        return jepa_predict(model, prepared, "test", device, version=config["version"]), model
+        weights = {k: config[k] for k in ("w_lat", "w_std", "w_cov") if k in config}
+        model, _, _ = train_jepa(prepared, device=device, seed=seed, version=config["version"],
+                                 w_bio=config["w_bio"], **weights, **epoch_kw)
+        return model
     raise ValueError(kind)
 
 
-def run_study(study_name: str, seeds=(0, 1, 2), k_folds: int = 5,
-              device=torch.device("cpu"), out_root="experiments"):
-    study = load_adni() if study_name == "adni" else load_oasis()
-    out_dir = os.path.join(out_root, study_name)
-    os.makedirs(out_dir, exist_ok=True)
-    os.makedirs(os.path.join(out_dir, "figures"), exist_ok=True)
+def fit_predict(config, prepared, seed: int, device, max_epochs: int | None = None):
+    """Train on the prepared split; return (standardized test predictions, model)."""
+    model = fit_model(config, prepared, seed, device, max_epochs)
+    return forecast(config, model, prepared, prepared.pairs["test"], device), model
 
-    feat_idx = {spec.name: d for d, spec in enumerate(study.dyn_specs)}
-    per_model: dict[str, list[dict]] = {m: [] for m in MODEL_NAMES}
-    runtimes: dict[str, list[float]] = {m: [] for m in MODEL_NAMES}
-    # aligned per-pair absolute errors + subject keys per seed (folds partition
-    # the pairs; subjects are the resampling clusters for the bootstrap)
-    err_seed: dict[str, dict[int, dict[str, list]]] = {m: {} for m in MODEL_NAMES}
-    subj_seed: dict[int, dict[str, list]] = {}
-    conv_seed: dict[str, dict[int, tuple]] = {m: {} for m in MODEL_NAMES}
-    manifest = {"study": study_name, "n_subjects": len(study.subjects),
-                "seeds": list(seeds), "k_folds": k_folds, "protocol": "5-fold subject-level CV"}
 
+# ------------------------------------------------------- cross-validation
+def run_cv(study, configs: dict, seeds=(0, 1, 2), k_folds: int = 5,
+           device=torch.device("cpu"), max_epochs: int | None = None, log=print) -> dict:
+    """Train/evaluate every config on every (seed, fold).
+
+    Returns per-fold metrics, per-pair absolute errors keyed by
+    (patient, input visit, target visit, nominal horizon) with one value per
+    seed, and per-patient conversion scores with one value per seed."""
+    names = list(configs)
+    per_fold = {m: [] for m in names}
+    errors = {m: defaultdict(lambda: defaultdict(list)) for m in names}  # m -> feat -> key -> [seed errs]
+    conv_scores = {m: defaultdict(list) for m in names}                   # m -> sid -> [seed scores]
+    conv_labels: dict[str, int] = {}
+    runtimes = {m: [] for m in names}
+    split_counts = []
     for seed in seeds:
         folds = subject_kfold(study, k=k_folds, seed=seed)
-        err_seed_m: dict[str, dict[str, list]] = {m: {f: [] for f in feat_idx} for m in MODEL_NAMES}
-        subj_seed_m: dict[str, list] = {f: [] for f in feat_idx}
         for fold, (tr, va, te) in enumerate(folds):
             prepared = prepare(study, splits=(tr, va, te))
-            fold_subj = np.array([study.subjects[pp["subject"]].sid
-                                  for pp in prepared.pairs["test"]])
-            for name, cfg in MODEL_CONFIGS.items():
+            split_counts.append({"seed": seed, "fold": fold,
+                                 **{f"n_subjects_{k}": len(v) for k, v in
+                                    zip(("train", "val", "test"), (tr, va, te))},
+                                 **{f"n_pairs_{k}": len(v) for k, v in prepared.pairs.items()}})
+            truth, _ = prepared.truth_std("test")
+            truth_raw = prepared.dyn_std.inverse(truth)
+            keys = [(study.subjects[p["subject"]].sid, p["i"], p["j"], float(p["h"]))
+                    for p in prepared.pairs["test"]]
+            for name, cfg in configs.items():
                 t0 = time.time()
-                pred_std, _ = fit_predict(cfg, prepared, seed, device)
+                model = fit_model(cfg, prepared, seed, device, max_epochs)
+                pred_std = forecast(cfg, model, prepared, prepared.pairs["test"], device)
                 runtimes[name].append(time.time() - t0)
-                metrics, conv = evaluate_predictions(prepared, "test", pred_std, return_conv=True)
-                per_model[name].append(metrics)
-                truth, cur = prepared.truth_std("test")
-                for f_name, f_idx in feat_idx.items():
-                    m_ = np.isfinite(truth[:, f_idx])
-                    e = np.abs(prepared.dyn_std.inverse(pred_std)[m_, f_idx]
-                               - prepared.dyn_std.inverse(truth)[m_, f_idx])
-                    err_seed_m[name][f_name].append(e)
-                    if name == MODEL_NAMES[0]:
-                        subj_seed_m[f_name].append(fold_subj[m_])
-                if conv is not None:
-                    existing = conv_seed[name].get(seed)
-                    conv_seed[name][seed] = conv if existing is None else \
-                        (np.concatenate([existing[0], conv[0]]),
-                         np.concatenate([existing[1], conv[1]]))
-            print(f"[{study_name} seed{seed} fold{fold + 1}/{k_folds}] done", flush=True)
-        for name in MODEL_NAMES:
-            err_seed[name][seed] = {f: np.concatenate(v) for f, v in err_seed_m[name].items()}
-        subj_seed[seed] = {f: np.concatenate(v) for f, v in subj_seed_m.items()}
-
-    # ------- paired bootstrap resampling PATIENTS (cluster level) ------------
-    # Visit-pairs of one patient are correlated; resampling patients preserves
-    # that correlation. Bonferroni correction over the reported family.
-    significance: dict = {}
-    ours = "jepa_v2_bio"
-    n_family = 0
-    prelim = []
-    for f_name in feat_idx:
-        for opp in BOOTSTRAP_OPPONENTS:
-            if opp == ours:
-                continue
-            prelim.append((f"{ours}_vs_{opp}_{f_name}_MAE", f_name, opp))
-    for opp in BOOTSTRAP_OPPONENTS:
-        if opp != ours:
-            prelim.append((f"{ours}_vs_{opp}_conversion_AUC", None, opp))
-    n_family = len(prelim)
-
-    for f_name in feat_idx:
-        for opp in BOOTSTRAP_OPPONENTS:
-            if opp == ours:
-                continue
-            # primary inference: pool seeds with each patient as its own
-            # cluster (patient x seed)
-            x = np.concatenate([err_seed[ours][s][f_name] for s in seeds])
-            y = np.concatenate([err_seed[opp][s][f_name] for s in seeds])
-            cl = np.concatenate([subj_seed[s][f_name] + f"__s{s}" for s in seeds])
-            pooled = cluster_paired_bootstrap(x, y, cl, seed=0)
-            per_seed = [cluster_paired_bootstrap(err_seed[ours][s][f_name],
-                                                 err_seed[opp][s][f_name],
-                                                 subj_seed[s][f_name], seed=s)
-                        for s in seeds]
-            significance[f"{ours}_vs_{opp}_{f_name}_MAE"] = {
-                "mean_diff": pooled["mean_diff"],
-                "ci_low": pooled["ci_low"], "ci_high": pooled["ci_high"],
-                "p_cluster_pooled": pooled["p"],
-                "n_clusters": pooled.get("n_clusters"),
-                "p_per_seed": [round(p["p"], 5) for p in per_seed],
-                "bonferroni_alpha": round(0.05 / n_family, 5),
-                "direction": "ours_lower_is_better",
-            }
-    for opp in BOOTSTRAP_OPPONENTS:
-        if opp == ours or ours not in conv_seed or opp not in conv_seed:
-            continue
-        per_seed = [paired_auc_bootstrap(conv_seed[ours][s][0], conv_seed[ours][s][1],
-                                         conv_seed[opp][s][0], seed=s) for s in seeds
-                    if s in conv_seed[ours] and s in conv_seed[opp]]
-        if per_seed:
-            significance[f"{ours}_vs_{opp}_conversion_AUC"] = {
-                "auc_ours": float(np.mean([r["auc_a"] for r in per_seed])),
-                "auc_opp": float(np.mean([r["auc_b"] for r in per_seed])),
-                "p_per_seed": [round(r["p"], 5) for r in per_seed],
-                "p_family_note": "AUC bootstrap already resamples subjects",
-                "bonferroni_alpha": round(0.05 / n_family, 5),
-            }
-
-    agg = {m: aggregate(per_model[m]) for m in MODEL_NAMES}
-    result = {
-        "manifest": manifest,
-        "aggregate": agg,
-        "per_seed": {m: per_model[m] for m in MODEL_NAMES},
-        "significance": significance,
-        "runtimes_s": {m: {"mean": float(np.mean(v))} for m, v in runtimes.items()},
-    }
-    with open(os.path.join(out_dir, "results.json"), "w") as f:
-        json.dump(result, f, indent=2)
-    return result, study
+                metrics = evaluate_predictions(prepared, "test", pred_std)
+                conv = conversion_analysis(cfg, model, prepared, te, device)
+                if "auc" in conv:
+                    metrics["conversion_auc"] = conv["auc"]
+                metrics["conversion_n"] = conv["n"]
+                per_fold[name].append({"seed": seed, "fold": fold, **metrics})
+                pred_raw = prepared.dyn_std.inverse(pred_std)
+                for f_idx, spec in enumerate(study.dyn_specs):
+                    for k_i, key in enumerate(keys):
+                        if np.isfinite(truth_raw[k_i, f_idx]):
+                            errors[name][spec.name][key].append(
+                                float(abs(pred_raw[k_i, f_idx] - truth_raw[k_i, f_idx])))
+                for sid, y, sc in zip(conv["sids"], conv["labels"], conv["scores"]):
+                    conv_scores[name][sid].append(float(sc))
+                    conv_labels[sid] = int(y)
+            log(f"[{study.name} seed{seed} fold{fold + 1}/{k_folds}] done")
+    return {"per_fold": per_fold, "errors": errors, "conv_scores": conv_scores,
+            "conv_labels": conv_labels, "runtimes": runtimes, "split_counts": split_counts,
+            "n_seeds": len(seeds)}
 
 
-def aggregate(per_seed: list[dict]) -> dict:
-    keys = set()
-    for r in per_seed:
-        keys |= set(r)
+def seed_averaged(records: dict, n_seeds: int) -> dict:
+    """key -> mean over seeds; every key must have exactly one value per seed."""
     out = {}
-    for k in sorted(keys):
-        vals = [r[k] for r in per_seed if k in r and np.isfinite(r[k])]
-        if vals:
-            out[k] = {"mean": float(np.mean(vals)), "std": float(np.std(vals)), "n_seeds": len(vals)}
+    for key, vals in records.items():
+        if len(vals) != n_seeds:
+            raise ValueError(f"{key}: {len(vals)} values for {n_seeds} seeds")
+        out[key] = float(np.mean(vals))
     return out
 
 
+def patient_level_mae_comparison(cv: dict, a: str, b: str, feature: str,
+                                 horizon: float | None = None, n_boot: int = 10000) -> dict:
+    """Paired MAE comparison of models a and b on one feature (optionally one
+    nominal horizon): errors averaged over seeds per prediction pair, then
+    patients as the unit (bootstrap CI + sign-flip p). Negative = a better."""
+    ea = seed_averaged(cv["errors"][a][feature], cv["n_seeds"])
+    eb = seed_averaged(cv["errors"][b][feature], cv["n_seeds"])
+    if set(ea) != set(eb):
+        raise ValueError(f"{a} vs {b}: prediction pairs differ for {feature}")
+    keys = sorted(k for k in ea if horizon is None or k[3] == float(horizon))
+    r = cluster_paired_bootstrap([ea[k] for k in keys], [eb[k] for k in keys],
+                                 [k[0] for k in keys], n_boot=n_boot, seed=0)
+    return {**r, "n_pairs": len(keys), "mae_a": float(np.mean([ea[k] for k in keys])) if keys else None,
+            "mae_b": float(np.mean([eb[k] for k in keys])) if keys else None}
+
+
+def compare_models(cv: dict, ours: str, opponents: list[str], features: list[str],
+                   n_boot: int = 10000) -> dict:
+    """Patient-level paired comparisons of `ours` against each opponent.
+
+    MAE: per (patient, input visit, target visit) the absolute error is
+    averaged over seeds; patients are then the unit of the bootstrap CI and
+    of the sign-flip permutation p-value (each patient counted once).
+    Conversion AUC: per-patient scores averaged over seeds; paired bootstrap
+    over patients. Bonferroni over the whole reported family."""
+    n_seeds = cv["n_seeds"]
+    family = [(f, opp) for f in features for opp in opponents] + [(None, opp) for opp in opponents]
+    alpha = 0.05 / len(family)
+    out: dict = {"_family": {"n_tests": len(family), "bonferroni_alpha": alpha,
+                             "ours": ours, "unit": "patient (errors averaged over seeds first)"}}
+    for f in features:
+        for opp in opponents:
+            r = patient_level_mae_comparison(cv, ours, opp, f, n_boot=n_boot)
+            out[f"{ours}_vs_{opp}_{f}_MAE"] = {
+                **r, "direction": "negative mean_diff favors ours",
+                "significant_bonferroni": bool(np.isfinite(r["p"]) and r["p"] < alpha)}
+    labels = cv["conv_labels"]
+    for opp in opponents:
+        sa = seed_averaged(cv["conv_scores"][ours], n_seeds)
+        sb = seed_averaged(cv["conv_scores"][opp], n_seeds)
+        sids = sorted(set(sa) & set(sb))
+        y = np.array([labels[s] for s in sids])
+        key = f"{ours}_vs_{opp}_conversion_AUC"
+        if len(sids) < 10 or not (0 < y.sum() < len(y)):
+            out[key] = {"n": len(sids), "note": "too few subjects or a single class"}
+            continue
+        r = paired_auc_bootstrap([sa[s] for s in sids], y, [sb[s] for s in sids],
+                                 n_boot=n_boot, seed=0)
+        out[key] = {**r, "n_cases": int(y.sum()),
+                    "significant_bonferroni": bool(np.isfinite(r["p"]) and r["p"] < alpha)}
+    return out
+
+
+def aggregate(per_fold: list[dict]) -> dict:
+    """Descriptive mean / std over all (seed, fold) runs of each metric."""
+    keys = set()
+    for r in per_fold:
+        keys |= {k for k in r if k not in ("seed", "fold")}
+    out = {}
+    for k in sorted(keys):
+        vals = [r[k] for r in per_fold if k in r and r[k] is not None and np.isfinite(r[k])]
+        if vals:
+            out[k] = {"mean": float(np.mean(vals)), "std": float(np.std(vals)), "n_runs": len(vals)}
+    return out
+
+
+def pooled_conversion_auc(cv: dict, name: str) -> dict:
+    """AUC of seed-averaged patient scores pooled over folds (one score per
+    patient), with the patient count."""
+    from sklearn.metrics import roc_auc_score
+    s = seed_averaged(cv["conv_scores"][name], cv["n_seeds"])
+    sids = sorted(s)
+    y = np.array([cv["conv_labels"][k] for k in sids])
+    if len(sids) == 0 or not (0 < y.sum() < len(y)):
+        return {"n": len(sids)}
+    return {"auc": float(roc_auc_score(y, [s[k] for k in sids])), "n": len(sids),
+            "n_cases": int(y.sum())}
+
+
+def run_study(study_name: str, seeds=(0, 1, 2), k_folds: int = 5,
+              device=torch.device("cpu"), out_root="experiments",
+              max_epochs: int | None = None, n_boot: int = 10000):
+    study = load_study(study_name)
+    out_dir = os.path.join(out_root, study_name)
+    manifest = {"study": study_name, "n_subjects": len(study.subjects),
+                "features": [s.name for s in study.dyn_specs],
+                "seeds": list(seeds), "k_folds": k_folds,
+                "protocol": f"{k_folds}-fold subject-level CV x {len(seeds)} seeds",
+                "primary_model": PRIMARY_MODEL, "comparators": COMPARATORS,
+                "max_epochs_override": max_epochs, "device": str(device),
+                "data_sha256": _sha256(DATA_FILES[study_name]) if study_name in DATA_FILES else None,
+                "environment": environment_manifest()}
+    cv = run_cv(study, MODEL_CONFIGS, seeds, k_folds, device, max_epochs)
+    features = [s.name for s in study.dyn_specs]
+    result = {
+        "manifest": manifest,
+        "split_counts": cv["split_counts"],
+        "aggregate": {m: aggregate(cv["per_fold"][m]) for m in MODEL_NAMES},
+        "conversion_pooled": {m: pooled_conversion_auc(cv, m) for m in MODEL_NAMES},
+        "per_fold": cv["per_fold"],
+        "significance": compare_models(cv, PRIMARY_MODEL, COMPARATORS, features, n_boot=n_boot),
+        "n_patients_with_test_pairs": {f: len({k[0] for k in cv["errors"][PRIMARY_MODEL][f]})
+                                       for f in features},
+        "runtimes_s": {m: {"mean": float(np.mean(v))} for m, v in cv["runtimes"].items()},
+    }
+    write_json(os.path.join(out_dir, "results.json"), result)
+    return result, study
+
+
 # ------------------------------------------------------- stress & rollouts
-def run_stress_and_rollouts(study_name: str, seed: int = 0, device=torch.device("cpu")):
-    """Hard tests on one held-out fold: missingness stress curves and
-    multi-step rollout evaluation."""
-    study = load_adni() if study_name == "adni" else load_oasis()
-    folds = subject_kfold(study, k=5, seed=seed)
-    tr, va, te = folds[0]
+def run_stress_and_rollouts(study_name: str, seed: int = 0, device=torch.device("cpu"),
+                            out_root: str = "experiments", max_epochs: int | None = None):
+    """Hard tests on one held-out fold (descriptive): missingness stress
+    curves and multi-step rollouts, scored identically for every model."""
+    study = load_study(study_name)
+    tr, va, te = subject_kfold(study, k=5, seed=seed)[0]
     prepared = prepare(study, splits=(tr, va, te))
 
-    stress_models = ["jepa_v2_bio", "jepa_v2", "gru", "ridge", "hgb"]
+    stress_models = [PRIMARY_MODEL, "jepa_v2", "gru", "ridge", "hgb", "carry_forward"]
     c_keys = [f"mae_{spec.name}_h{h}" for spec in study.dyn_specs
               if spec.group == "C" for h in (1, 2, 3)]
-    if not c_keys:  # study without explicit C group: fall back to all features
+    if not c_keys:
         c_keys = [f"mae_{spec.name}_h{h}" for spec in study.dyn_specs for h in (1, 2, 3)]
     stress: dict = {}
     trained = {}
     for name in stress_models:
         cfg = MODEL_CONFIGS[name]
-        pred_std, model = fit_predict(cfg, prepared, seed, device)
+        model = fit_model(cfg, prepared, seed, device, max_epochs)
         trained[name] = model
-        base, _ = evaluate_predictions(prepared, "test", pred_std, return_conv=True)
-        curve = {"0.00": float(np.mean([base[k] for k in c_keys if k in base]))}
-        for frac in (0.25, 0.50, 0.75):
-            degraded = degraded_dyn_lookup(prepared, frac, seed=seed)
-            if name.startswith("jepa"):
-                p = jepa_predict_degraded(trained[name], prepared, "test", degraded,
-                                          device, version="v2")
-            elif name == "gru":
-                p = gru_predict_degraded(trained[name], prepared, "test", degraded, device)
-            else:
-                from .model.baselines import ridge_design_matrix
-                X = ridge_design_matrix(prepared, prepared.pairs["test"],
-                                        dyn_lookup=lambda s: degraded[s])
-                p = trained[name].predict(X)
-            m, _ = evaluate_predictions(prepared, "test", p, return_conv=True)
+        curve = {}
+        for frac in (0.0, 0.25, 0.50, 0.75):
+            degraded = None if frac == 0.0 else degraded_dyn_lookup(prepared, frac, seed=seed)
+            p = forecast(cfg, model, prepared, prepared.pairs["test"], device, dyn_by_subject=degraded)
+            m = evaluate_predictions(prepared, "test", p)
             curve[f"{frac:.2f}"] = float(np.mean([m[k] for k in c_keys if k in m]))
         stress[name] = curve
 
-    rollouts: dict = {}
-    for name in ("jepa_v2_bio", "jepa_v2", "gru"):
-        if name == "gru":
-            rollouts[name] = gru_rollout(trained[name], prepared, "test", device)
-        else:
-            rollouts[name] = jepa_rollout(trained[name], prepared, "test", device)
+    rollouts = {name: (gru_rollout if name == "gru" else jepa_rollout)(
+        trained[name], prepared, "test", device) for name in (PRIMARY_MODEL, "jepa_v2", "gru")}
 
-    out = {"stress_mae": stress, "rollout": rollouts}
-    path = os.path.join("experiments", study_name, "hard_tests.json")
-    with open(path, "w") as f:
-        json.dump(out, f, indent=2)
+    out = {"_meta": {"seed": seed, "fold": 0, "n_test_subjects": len(te),
+                     "n_test_pairs": len(prepared.pairs["test"]),
+                     "note": "single held-out fold; descriptive, no inference"},
+           "stress_mae": stress, "rollout": rollouts}
+    write_json(os.path.join(out_root, study_name, "hard_tests.json"), out)
     return out
 
 
 # ------------------------------------------------------------- reporting
+def _fmt(a: dict, k: str) -> str:
+    return f"{a[k]['mean']:.3f}±{a[k]['std']:.3f}" if k in a else "—"
+
+
 def print_table(result, study_name):
     agg = result["aggregate"]
     feats = PRIMARY_FEATURES[study_name]
-    print(f"\n=== {study_name.upper()} — test MAE (mean ± std over 15 runs) ===")
-    header = ["model"] + [f"{f}@{h}m" for f in feats for h in (12, 24, 36)] + \
+    print(f"\n=== {study_name.upper()} — test MAE (mean ± std over runs; descriptive) ===")
+    header = ["model"] + [f"{f}@{12 * h}m" for f in feats for h in (1, 2, 3)] + \
              ["convAUC", "capViol", "monoViol"]
     print(" | ".join(f"{h:>16}" for h in header))
     for m in MODEL_NAMES:
         a = agg[m]
-        row = [m]
-        for f in feats:
-            for h in (1, 2, 3):
-                k = f"mae_{f}_h{h}"
-                row.append(f"{a[k]['mean']:.3f}±{a[k]['std']:.3f}" if k in a else "—")
-        for k in ("conversion_auc", "capacity_violation_rate", "monotonic_violation_rate"):
-            row.append(f"{a[k]['mean']:.3f}±{a[k]['std']:.3f}" if k in a else "—")
+        row = [m] + [_fmt(a, f"mae_{f}_h{h}") for f in feats for h in (1, 2, 3)]
+        conv = result["conversion_pooled"][m]
+        row.append(f"{conv['auc']:.3f}" if "auc" in conv else "—")
+        row += [_fmt(a, "capacity_violation_rate"), _fmt(a, "monotonic_violation_rate")]
         print(" | ".join(f"{c:>16}" for c in row))
-    print("\n--- significance (cluster bootstrap over patients, ours = jepa_v2_bio) ---")
-    for k, v in result["significance"].items():
-        extra = f"auc {v.get('auc_ours', 0):.3f} vs {v.get('auc_opp', 0):.3f}" if "AUC" in k \
-            else f"ΔMAE {v['mean_diff']:+.4f} [{v['ci_low']:+.4f}, {v['ci_high']:+.4f}]"
-        pp = v.get("p_cluster_pooled")
-        print(f"  {k:48s} {extra}  p_pooled = {pp:.4f}" if pp is not None else
-              f"  {k:48s} {extra}  p_per_seed = {v.get('p_per_seed')}")
+    sig = result["significance"]
+    fam = sig["_family"]
+    print(f"\n--- patient-level paired inference (ours = {fam['ours']}; "
+          f"Bonferroni alpha = {fam['bonferroni_alpha']:.5f} over {fam['n_tests']} tests) ---")
+    for k, v in sig.items():
+        if k.startswith("_"):
+            continue
+        if "auc_a" in v:
+            extra = f"AUC {v['auc_a']:.3f} vs {v['auc_b']:.3f} [Δ CI {v['ci_low']:+.3f}, {v['ci_high']:+.3f}]"
+        elif "mean_diff" in v and v["mean_diff"] is not None and np.isfinite(v["mean_diff"]):
+            extra = f"ΔMAE {v['mean_diff']:+.4f} [{v['ci_low']:+.4f}, {v['ci_high']:+.4f}]"
+        else:
+            print(f"  {k:48s} {v.get('note', 'not estimable')}")
+            continue
+        flag = "significant" if v.get("significant_bonferroni") else "n.s."
+        print(f"  {k:48s} {extra}  p = {v['p']:.4f} ({flag})")
 
 
 def make_figures(result, hard, study_name, out_root="experiments"):
@@ -291,7 +413,9 @@ def make_figures(result, hard, study_name, out_root="experiments"):
 
     agg = result["aggregate"]
     fig_dir = os.path.join(out_root, study_name, "figures")
+    os.makedirs(fig_dir, exist_ok=True)
     colors = ["#9aa5b1", "#9aa5b1", "#9aa5b1", "#9aa5b1", "#8fb8de", "#4c86c6", "#1f5fa8", "#123c66"]
+    n_runs = len(result["per_fold"][MODEL_NAMES[0]])
 
     feats = PRIMARY_FEATURES[study_name]
     fig, axes = plt.subplots(1, len(feats), figsize=(5 * len(feats), 4))
@@ -304,24 +428,29 @@ def make_figures(result, hard, study_name, out_root="experiments"):
         ax.set_xticks(range(len(MODEL_NAMES)))
         ax.set_xticklabels(FIG_LABELS, fontsize=7)
         ax.set_title(f"{f} — MAE at 24 months (lower=better)")
-    fig.suptitle(f"Prediction accuracy — {study_name.upper()} (5-fold CV × 3 seeds)")
+    fig.suptitle(f"Prediction accuracy — {study_name.upper()} (mean ± SD over {n_runs} runs)")
     fig.tight_layout()
     fig.savefig(os.path.join(fig_dir, "fig1_mae.png"), dpi=160)
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(8, 4))
-    kinds = [("capacity_violation_rate", "R1: decline w/o biological cause"),
-             ("monotonic_violation_rate", "R2: pathology reversal")]
-    for j, (k, lbl) in enumerate([kv for kv in kinds if any(kv[0] in agg[m] for m in MODEL_NAMES)]):
+    kinds = [("capacity_violation_rate", "R1: decline beyond capacity", "#c0504d"),
+             ("monotonic_violation_rate", "R2: pathology reversal", "#e8a33d")]
+    present = [kv for kv in kinds if any(kv[0] in agg[m] for m in MODEL_NAMES)]
+    for j, (k, lbl, col) in enumerate(present):
         vals = [agg[m].get(k, {}).get("mean", 0.0) for m in MODEL_NAMES]
         errs = [agg[m].get(k, {}).get("std", 0.0) for m in MODEL_NAMES]
-        ax.bar(np.arange(len(MODEL_NAMES)) + (j - 0.5) * 0.38, vals, 0.38,
-               yerr=errs, capsize=3, label=lbl, color=["#c0504d", "#e8a33d"][j])
+        off = (j - (len(present) - 1) / 2) * 0.38
+        ax.bar(np.arange(len(MODEL_NAMES)) + off, vals, 0.38, yerr=errs, capsize=3, label=lbl, color=col)
+        ref = agg[MODEL_NAMES[0]].get(f"observed_{k}")
+        if ref:
+            ax.axhline(ref["mean"], color=col, ls="--", lw=1,
+                       label=f"{lbl.split(':')[0]} rate of the OBSERVED data")
     ax.set_xticks(range(len(MODEL_NAMES)))
     ax.set_xticklabels(FIG_LABELS, fontsize=7)
     ax.set_ylabel("violation rate on test predictions")
-    ax.set_title(f"Biological plausibility — {study_name.upper()}")
-    ax.legend(fontsize=8)
+    ax.set_title(f"Rule violations vs observed-data reference — {study_name.upper()}")
+    ax.legend(fontsize=7)
     fig.tight_layout()
     fig.savefig(os.path.join(fig_dir, "fig2_violations.png"), dpi=160)
     plt.close(fig)
@@ -347,55 +476,55 @@ def make_figures(result, hard, study_name, out_root="experiments"):
     if hard:
         fig, ax = plt.subplots(figsize=(7, 4))
         fracs = ["0.00", "0.25", "0.50", "0.75"]
-        for name, style in [("jepa_v2_bio", "o-"), ("jepa_v2", "s--"), ("gru", "^--"),
-                            ("ridge", "v--"), ("hgb", "d--")]:
+        for name, style in [(PRIMARY_MODEL, "o-"), ("jepa_v2", "s--"), ("gru", "^--"),
+                            ("ridge", "v--"), ("hgb", "d--"), ("carry_forward", "x:")]:
             if name in hard["stress_mae"]:
                 ys = [hard["stress_mae"][name].get(f, np.nan) for f in fracs]
-                ax.plot([f * 100 for f in map(float, fracs)], ys, style, label=name)
+                ax.plot([float(f) * 100 for f in fracs], ys, style, label=name)
         ax.set_xlabel("input measurements additionally removed (%)")
         ax.set_ylabel("mean MAE over clinical features")
-        ax.set_title(f"Missingness stress test — {study_name.upper()} (held-out fold)")
+        ax.set_title(f"Missingness stress test — {study_name.upper()} (one held-out fold)")
         ax.legend(fontsize=8)
         fig.tight_layout()
         fig.savefig(os.path.join(fig_dir, "fig4_stress.png"), dpi=160)
         plt.close(fig)
 
         fig, ax = plt.subplots(figsize=(7, 4))
-        for name, style in [("jepa_v2_bio", "o-"), ("jepa_v2", "s--"), ("gru", "^--")]:
+        for name, style in [(PRIMARY_MODEL, "o-"), ("jepa_v2", "s--"), ("gru", "^--")]:
             if name in hard["rollout"]:
                 ys = [hard["rollout"][name].get(f"rollout_mae_{feats[1]}_step{s}", np.nan)
                       for s in (1, 2, 3)]
                 ax.plot([12, 24, 36], ys, style, label=name)
         ax.set_xlabel("months ahead (multi-step rollout, predictions fed back)")
         ax.set_ylabel(f"{feats[1]} MAE")
-        ax.set_title("Rollout: error accumulation over the trajectory")
+        ax.set_title("Rollout: error accumulation over the trajectory (one fold)")
         ax.legend(fontsize=8)
         fig.tight_layout()
         fig.savefig(os.path.join(fig_dir, "fig5_rollout.png"), dpi=160)
         plt.close(fig)
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--study", choices=["adni", "oasis", "both"], default="both")
+    ap.add_argument("--study", choices=["adni", "oasis", "both", "synthetic"], default="both")
     ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     ap.add_argument("--folds", type=int, default=5)
-    args = ap.parse_args()
+    ap.add_argument("--device", default="cpu", help="cpu (default, deterministic), cuda, mps or auto")
+    ap.add_argument("--max-epochs", type=int, default=None,
+                    help="cap training epochs (pipeline smoke runs only; never for reported results)")
+    ap.add_argument("--out-root", default="experiments")
+    ap.add_argument("--n-boot", type=int, default=10000)
+    args = ap.parse_args(argv)
+    device = resolve_device(args.device)
     studies = ["adni", "oasis"] if args.study == "both" else [args.study]
     for s in studies:
-        res, study = run_study(s, seeds=args.seeds, k_folds=args.folds)
-        try:
-            hard = run_stress_and_rollouts(s, seed=args.seeds[-1])
-        except Exception as e:  # hard tests must never void the main results
-            print(f"[warn] hard tests failed for {s}: {e}")
-            hard = None
+        res, _ = run_study(s, seeds=args.seeds, k_folds=args.folds, device=device,
+                           out_root=args.out_root, max_epochs=args.max_epochs, n_boot=args.n_boot)
+        hard = run_stress_and_rollouts(s, seed=args.seeds[-1], device=device,
+                                       out_root=args.out_root, max_epochs=args.max_epochs)
         print_table(res, s)
-        if hard:
-            print(f"\n--- hard tests ({s}) ---")
-            print("stress MAE:", json.dumps(hard["stress_mae"], indent=1))
-            print("rollout:", json.dumps(hard["rollout"], indent=1))
-        make_figures(res, hard, s)
-        print(f"figures + results.json + hard_tests.json written to experiments/{s}/")
+        make_figures(res, hard, s, out_root=args.out_root)
+        print(f"figures + results.json + hard_tests.json written to {args.out_root}/{s}/")
 
 
 if __name__ == "__main__":

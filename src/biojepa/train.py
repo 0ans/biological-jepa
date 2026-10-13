@@ -1,4 +1,4 @@
-"""Training loops (v1 snapshot-encoder and v2 history-encoder JEPA)."""
+"""Training loops (v1 snapshot-encoder and v2/v3 history-encoder JEPA)."""
 from __future__ import annotations
 
 import torch
@@ -10,7 +10,15 @@ from .utils import seed_everything
 def train_jepa(prepared, device=torch.device("cpu"), seed: int = 0, epochs: int = 400,
                lr: float = 3e-3, batch: int = 256, patience: int = 60,
                w_bio: float = 0.0, ema_momentum: float = 0.99, version: str = "v2",
-               w_lat: float = 1.0):
+               w_lat: float = 1.0, w_std: float = 0.5, w_cov: float = 0.25,
+               min_batch: int = 16):
+    """Train a JEPA model; returns (model, best validation sup_future, last epoch).
+
+    Latent-objective weights: w_lat (latent prediction loss), w_std / w_cov
+    (VICReg anti-collapse on the predicted embedding). Setting all three to 0
+    leaves the identical architecture trained purely on the supervised
+    clinical head — the matched control for the latent-objective ablation.
+    """
     seed_everything(seed)
     study = prepared.study
     model = build_model(version, in_dim=prepared.in_dim, step_dim=prepared.step_dim,
@@ -22,7 +30,10 @@ def train_jepa(prepared, device=torch.device("cpu"), seed: int = 0, epochs: int 
     train = prepared.pair_tensors("train", device)
     val = prepared.pair_tensors("val", device)
     n = train["x_i"].shape[0]
+    if n < min_batch:
+        raise ValueError(f"only {n} training pairs; at least min_batch={min_batch} are needed")
     is_v2 = version in ("v2", "v3")
+    weights = dict(w_lat=w_lat, w_std=w_std, w_cov=w_cov)
 
     def run_loss(t, idx, w_b, pids=None):
         b = {k: v[idx] for k, v in t.items() if isinstance(v, torch.Tensor)}
@@ -30,10 +41,11 @@ def train_jepa(prepared, device=torch.device("cpu"), seed: int = 0, epochs: int 
             return model.loss(b["seq_i"], b["len_i"], b["seq_j"], b["len_j"], b["ctx"],
                               b["dt_feat"], b["dyn_j"], b["mask_j"], b["dyn_i"], b["mask_i"],
                               rule_engine=prepared.engine, severity=b["severity"],
-                              dt=b["dt"], w_bio=w_b, w_lat=w_lat, patient_ids=pids)
+                              dt=b["dt"], w_bio=w_b, patient_ids=pids, **weights)
         return model.loss(b["x_i"], b["x_j"], b["dt_feat"], b["dyn_j"], b["mask_j"],
                           b["dyn_i"], b["mask_i"], rule_engine=prepared.engine,
-                          severity=b["severity"], dt=b["dt"], w_bio=w_b, w_lat=w_lat)
+                          severity=b["severity"], dt=b["dt"], w_bio=w_b,
+                          patient_ids=pids, **weights)
 
     best_val, best_state, wait = float("inf"), None, 0
     for epoch in range(epochs):
@@ -41,7 +53,7 @@ def train_jepa(prepared, device=torch.device("cpu"), seed: int = 0, epochs: int 
         perm = torch.randperm(n)
         for lo in range(0, n, batch):
             idx = perm[lo: lo + batch]
-            if len(idx) < 16:
+            if len(idx) < min_batch:
                 continue  # VICReg / R3 need a reasonable batch
             losses = run_loss(train, idx, w_bio,
                               pids=[train["patient_ids"][i] for i in idx.tolist()])

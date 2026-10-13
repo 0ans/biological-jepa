@@ -1,31 +1,23 @@
 # experiments/ — evidence artifacts
 
-Every number claimed in `docs/RESULTS.md` lives here. Nothing hand-written:
-all files are produced by `make experiments` / `python -m biojepa.hard_tests2`.
+Every number in `docs/RESULTS.md` is generated from files in this folder by
+`scripts/make_results_md.py`. Nothing here is written by hand.
 
-## Per study (`adni/`, `oasis/`)
+## Per study (`adni/`, `oasis/`) — created by the corrected pipeline
 
-| File | Contents |
-|---|---|
-| `results.json` | 15-run (5-fold CV × 3 seeds) aggregate + per-seed metrics + paired-bootstrap significance for all 8 models |
-| `hard_tests.json` | Missingness stress curves + multi-step rollout trajectories/violations |
-| `hard_tests2.json` | Clinical tests T1–T6 (decliner detection, tolerance, early prognosis, unseen 48-month horizon, converter cohort, conversion) |
-| `real_vs_prediction.json` | Population trajectory bias, predicted-vs-actual change correlation, quintile calibration |
-| `figures/` | fig1 accuracy · fig2 biological violations · fig3 amyloid-subgroup · fig4 stress · fig5 rollout |
+| File | Produced by | Contents |
+|---|---|---|
+| `results.json` | `python -m biojepa.run_experiments` | manifest (data SHA-256, git commit, software versions, seeds, folds), split counts, per-run metrics, descriptive aggregates, pooled conversion AUC, patient-level paired inference |
+| `hard_tests.json` | same command | missingness stress curves and multi-step rollouts (one held-out fold, descriptive) |
+| `latent_ablation.json` | `python scripts/latent_ablation.py --study <study>` | primary hypothesis: JEPA vs identical supervised control, pre-specified endpoint |
+| `hard_tests2.json` | `python -m biojepa.hard_tests2` | ADNI clinical tests T1–T5 (one held-out fold, descriptive) |
+| `figures/` | `run_experiments` | fig1 accuracy · fig2 violations vs observed data · fig3 amyloid subgroup · fig4 stress · fig5 rollout |
 
-## `chatgpt_benchmark/` — head-to-head vs a general LLM
+The folders do not exist until the experiments are rerun on licensed data.
 
-Identical patient inputs were given to both systems; our predictions were
-sealed before the LLM's answers arrived.
+## `archive/`
 
-| File | Contents |
-|---|---|
-Participant-level artifacts (prompts, per-patient predictions, ground-truth
-follow-ups) were **removed from the repository** for ADNI
-DUA compliance and are kept privately by the author. Only aggregate outcomes
-remain: `comparison_result.json` (per-metric MAE + conversion counts) and
-`cell_tally.json` (closer-prediction cell counts). The benchmark regenerates
-locally from an ADNI copy via `python -m biojepa.hard_tests2` and the batched
-prompts builder.
+Pre-audit artifacts kept for traceability only — see
+`archive/2026-09_pre-audit/README.md` for why they must not be cited.
 
-Participant-level data is **not committed** (see `docs/ADNI_ACCESS.md`).
+Participant-level data are never committed (see `docs/ADNI_ACCESS.md`).

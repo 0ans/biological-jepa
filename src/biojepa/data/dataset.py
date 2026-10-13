@@ -28,7 +28,12 @@ class Subject:
     patho_status: np.ndarray   # [K] binary pathology status flags (0/1, -1 = unknown)
     group: str                 # diagnostic group string
     converts: bool             # converts to dementia during study (label)
-    time_under_risk: float | None = None   # years to conversion or end of follow-up
+    # years from baseline to conversion (converters) or to the end of
+    # follow-up (non-converters); None when the timing cannot be determined
+    time_under_risk: float | None = None
+    # already demented at the baseline visit: such subjects cannot "convert"
+    # and are excluded from every conversion analysis
+    dementia_at_baseline: bool = False
 
 
 @dataclass
@@ -51,25 +56,27 @@ class Study:
 
 
 def subject_split(study: Study, fractions=(0.7, 0.15, 0.15), seed: int = 0, stratify: bool = True):
-    """Split subject indices into train/val/test, stratified by group. No subject
-    appears in more than one split (prevents longitudinal leakage)."""
+    """Split subject indices into train/val/test (stratified by group unless
+    stratify=False). No subject appears in more than one split (prevents
+    longitudinal leakage)."""
     rng = np.random.RandomState(seed)
-    groups = {}
-    for idx, s in enumerate(study.subjects):
-        groups.setdefault(s.group, []).append(idx)
+    if stratify:
+        groups: dict[str, list[int]] = {}
+        for idx, s in enumerate(study.subjects):
+            groups.setdefault(s.group, []).append(idx)
+        blocks = [np.array(members) for _, members in sorted(groups.items())]
+    else:
+        blocks = [np.arange(len(study.subjects))]
     train, val, test = [], [], []
-    for g, members in sorted(groups.items()):
-        members = np.array(members)
+    for members in blocks:
+        members = members.copy()
         rng.shuffle(members)
         n = len(members)
-        if stratify:
-            n_tr = int(round(fractions[0] * n))
-            n_va = int(round(fractions[1] * n))
-            train += members[:n_tr].tolist()
-            val += members[n_tr:n_tr + n_va].tolist()
-            test += members[n_tr + n_va:].tolist()
-        else:
-            train += members.tolist()
+        n_tr = int(round(fractions[0] * n))
+        n_va = int(round(fractions[1] * n))
+        train += members[:n_tr].tolist()
+        val += members[n_tr:n_tr + n_va].tolist()
+        test += members[n_tr + n_va:].tolist()
     return set(train), set(val), set(test)
 
 

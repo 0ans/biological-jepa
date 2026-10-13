@@ -1,7 +1,11 @@
 # Research Log (honest, chronological)
 
 Everything that happened during this study — including what failed and why —
-is recorded here. Dates: 2026-09-25.
+is recorded here. Dates: 2026-09-25 (sections 0–10), 2026-10-13 (section 11).
+
+> Every number quoted in sections 0–10 was produced before the October 2026
+> audit (section 11) and is superseded; those sections are kept as a record
+> of the process, not as evidence.
 
 ## 0. v2 upgrade ("make it stronger, stage by stage")
 
@@ -248,3 +252,54 @@ No data leakage found. Changes made:
   A/T/N (vector-conditional capacity is future work); the synthetic tests
   verify implementation consistency, not clinical biology; OASIS-2 is a
   small-n, N-only pipeline check.
+
+## 11. Scientific audit (2026-10-13) — corrections that invalidate earlier numbers
+
+A line-by-line audit of code, tests, documents and stored artifacts found
+problems that change how every earlier result must be read. All were fixed;
+earlier artifacts were moved to `experiments/archive/2026-09_pre-audit/`.
+
+Statistics and design
+- **Pseudo-replication:** significance tests used `patient__seed` as the
+  cluster, so each patient counted once per seed (5,610 "clusters" for ~1,870
+  ADNI patients) while per-seed p-values disagreed strongly. Now: each
+  prediction pair's error is averaged over seeds and patients are the unit of
+  the bootstrap CI and sign-flip p-value.
+- **Conversion AUC:** baseline-demented subjects (OASIS `Demented`, ADNI
+  `AD`) were negatives; no event window; eligibility required an observed
+  follow-up visit. Now: baseline index, 3-year window, time-aware labels
+  (later converters are event-free controls), baseline dementia excluded,
+  forecasts independent of follow-up visits. The single-fold T6 was removed.
+- **Rollout violations** were step-to-step for JEPA but cumulative for the
+  GRU; both now get identical stepwise and cumulative scoring.
+- **GRU training budget** (200 epochs / patience 25 / no schedule) now
+  matches JEPA (400 / 60 / cosine).
+- **R2 units:** slack calibrated as an absolute reversal but applied × Δt;
+  now absolute everywhere.
+- **Observed-data reference** rule-violation rates are reported next to every
+  model's rates.
+- **One model of interest** (`jepa_v2_bio`) everywhere, including the demo
+  script (previously v3, never benchmarked) and clinical tests (previously λ2).
+
+Code
+- VICReg terms on the no-gradient EMA target were constants (removed); the
+  latent ablation's control kept VICReg (now `w_lat = w_std = w_cov = 0`) and
+  became a 5-fold × 3-seed analysis with a pre-specified endpoint.
+- The v3 stress-test path dropped the delta anchor (2.27σ error at 0% extra
+  missingness); all models now forecast through one `forecast()` function.
+- `mlp()` placed activations by width instead of position;
+  `subject_split(stratify=False)` produced empty val/test; v1 rule penalty
+  ignored the current-visit mask; Ridge/HGB fallbacks averaged imputed zeros;
+  Standardizer produced NaN for all-missing columns; synthetic cognition
+  declined without neurodegeneration.
+
+Tests and documents
+- The R3 test never ran R3 (no patient ids); the future-truth test compared a
+  function with itself; another used process-randomized `hash()`; the
+  ablation test read source text. All replaced by behavioural tests, plus
+  regression tests for each fix and an end-to-end run of every entry point.
+- `RESULTS.md` is now generated from artifacts only; the rules document no
+  longer claims tau monotonicity or contradicts R3; the ADNI loader's schema
+  and the ADNI publication requirements are documented; the data script no
+  longer downloads third-party ADNI copies by default.
+

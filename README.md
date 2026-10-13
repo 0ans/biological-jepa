@@ -2,7 +2,7 @@
 
 **A research prototype for forecasting longitudinal Alzheimer's disease measurements through future latent representations.**
 
-> **Research status — October 2026:** Code and exploratory results are available. This is **not** a clinically validated system. Historical baseline numbers require rerunning after the October 2026 GRU forecast-horizon correction. No new benchmark result is claimed in this release.
+> **Research status — October 2026:** An audit corrected the statistics (patient-level inference instead of counting each patient once per seed), the conversion design, the GRU training budget, the rollout and rule-violation scoring and several code bugs. **All earlier numbers are superseded** and archived with the reasons in [`experiments/archive/2026-09_pre-audit/`](experiments/archive/2026-09_pre-audit/README.md). No benchmark result is claimed until the corrected pipeline is rerun on licensed data. This is **not** a clinically validated system.
 
 ## Why this project exists
 
@@ -24,12 +24,13 @@ The project combines a temporal context encoder, a forecast-horizon-conditioned 
 
 | Status | What it means |
 |---|---|
-| Implemented | History-aware JEPA-inspired architecture, supervised clinical head, biological penalties and baselines |
-| Tested in code | Synthetic rule-engine checks and automated unit/smoke tests |
-| Historical only | ADNI-derived and OASIS-2 aggregate results produced **before** the GRU comparison correction |
-| Still required | Fair baseline reruns, latent-loss ablation across independent patient splits, patient-level confidence intervals and external validation |
+| Implemented | History-aware JEPA-inspired architecture, supervised clinical head, biological penalties, baselines with equal inputs and training budget |
+| Implemented analysis plan | 5-fold × 3-seed subject-level CV, patient-level paired inference, prospective conversion design, latent-objective ablation with a matched supervised control |
+| Tested in code | Rule-engine, statistics, conversion-design and leakage regression tests, plus an end-to-end run of every entry point on synthetic data |
+| Superseded | All pre-audit ADNI / OASIS-2 numbers ([why](experiments/archive/2026-09_pre-audit/README.md)) |
+| Still required | Rerun on licensed ADNI data, ADNI publication review, external validation |
 
-The archived numbers in [RESULTS.md](docs/RESULTS.md) remain available for traceability. **They must not be cited as evidence that this model outperforms a correctly time-conditioned GRU.** Original code and stored artifact lineage should accompany any formal reproduction.
+[RESULTS.md](docs/RESULTS.md) is generated from the experiment artifacts by `scripts/make_results_md.py`; it contains no numbers until the corrected pipeline has been run.
 
 ## Evaluation protocol
 
@@ -50,24 +51,32 @@ make setup
 make test
 ```
 
-Run the *exploratory*, same-architecture latent-loss ablation on synthetic data:
+Check the full pipeline on synthetic data (minutes on a laptop; a pipeline check, not evidence):
 
 ```bash
-./.venv/bin/python scripts/latent_ablation.py --study synthetic --seed 0
+./.venv/bin/python -m biojepa.run_experiments --study synthetic --seeds 0 1 --folds 3
+./.venv/bin/python scripts/latent_ablation.py --study synthetic --seeds 0 --folds 3
 ```
 
-The script compares the same v2 architecture with latent loss coefficient 0 versus 1. **One split is not confirmatory evidence.** The full evaluation requires repeated patient-disjoint experiments with appropriately paired uncertainty estimates.
+For the real analyses, first review [ADNI access](docs/ADNI_ACCESS.md) and place your licensed ADNI file, then:
 
-To run full dataset benchmarks, first review [ADNI access](docs/ADNI_ACCESS.md), verify permissions and local inputs, then use `make data` and `make experiments`. Training runtime depends on compute environment.
+```bash
+make data            # OASIS-2 download + hash checks of your ADNI file
+make experiments     # model comparison, conversion, stress and rollout tests
+make ablation        # primary hypothesis: latent objective vs matched supervised control
+make results         # regenerate docs/RESULTS.md from the artifacts
+```
+
+The latent-objective ablation compares the identical v2 architecture with the latent objective (`w_lat=1`, VICReg on) against a purely supervised control (`w_lat=w_std=w_cov=0`) over 5 folds × 3 seeds, with one pre-specified endpoint (default MMSE at 12 months) — fix it before looking at any result.
 
 ## Publication materials
 
 - [Research manuscript draft](paper/MANUSCRIPT.md) — structured background, methods, limitations and explicit reporting status
 - [Scientific submission checklist](paper/SUBMISSION_CHECKLIST.md) — remaining experiments, statistical validation and review requirements
 - [Research protocol](docs/RESEARCH_PROTOCOL.md) — comparability, evaluation design and interpretation
-- [Archived results](docs/RESULTS.md) — historical results, not new evidence
+- [Results](docs/RESULTS.md) — generated from the artifacts; empty until the corrected pipeline is rerun
 - [Research log](docs/RESEARCH_LOG.md) — design decisions and failed attempts
-- [Experiment artifacts](experiments/README.md) — provenance of stored run outputs
+- [Experiment artifacts](experiments/README.md) — provenance of run outputs and the pre-audit archive
 
 ## Repository guide
 
@@ -76,7 +85,7 @@ src/biojepa/          model, data processing, objectives, evaluation, baselines
 scripts/              data loading, patient inference, latent-loss ablation
 tests/                unit, fairness and smoke tests
 docs/                 transparent protocols, scientific context, SVG figures
-experiments/          historical aggregate results and plots
+experiments/          run outputs (after rerun) and the pre-audit archive
 paper/                manuscript draft and submission quality gates
 .github/workflows/    automated test checks
 ```
@@ -87,7 +96,7 @@ Available ADNI-derived data have restricted longitudinal biomarker coverage, and
 
 ## Attribution
 
-Cite as research software pending a verified manuscript. Model inspiration includes I-JEPA and VICReg; datasets include ADNI and OASIS-2. Verify bibliographic details and data-use agreements before submission.
+Cite as research software pending a verified manuscript. Model inspiration includes I-JEPA and VICReg; datasets include ADNI and OASIS-2. Publications using ADNI data must follow the ADNI Data Use Agreement (manuscript review by the ADNI Data and Publications Committee and the standard acknowledgement); verify bibliographic details and all data-use terms before submission.
 
 ## License
 

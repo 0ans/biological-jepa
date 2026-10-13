@@ -15,21 +15,32 @@ R1 Causal-capacity rule ("an effect requires a cause"):
 
 R2 Monotonicity ("pathology does not reverse"):
    Amyloid burden (A) and neurodegeneration markers (N) cannot improve beyond
-   a noise slack on trial timescales. Penalized (and counted as violations)
-   when a predicted trajectory reverses them. Clinical (C) features are
-   intentionally NOT monotonic — retest/practice effects are real.
+   a per-feature measurement-noise slack. The slack is an ABSOLUTE amount in
+   standardized units (sigma): measurement noise on a difference of two
+   visits does not grow with the time between them, so the allowed reversal
+   is the same at every horizon. Penalized (and counted as violations) when a
+   predicted trajectory reverses A or N beyond the slack. Tau (T) is not
+   constrained, and clinical (C) features are intentionally NOT monotonic —
+   retest/practice effects are real.
 
-R3 Data-driven calibration:
-   Capacity curves are fitted from the *training cohort only*: per clinical
-   feature, capacity(severity) is the 90th percentile of observed decline
-   rates within severity bins (piecewise-linear). The rule is an empirical
-   envelope of real biology, not a hand-picked constant.
+R3 Population-level ordering ("stronger cause, stronger effect"):
+   Within a batch of UNIQUE patients, the top pathology-severity quartile may
+   not be predicted to decline slower than the bottom quartile beyond a small
+   margin. A statistical group-level regularity, not individual causality.
+
+Calibration (R1 and R2), fitted from the *training cohort only*:
+   per clinical feature, capacity(severity) is the 90th percentile of
+   observed patient-level decline rates within severity bins
+   (piecewise-linear), minus a noise envelope; R2 slacks come from apparent
+   reversals in the training data. Empirical envelopes, not hand-picked
+   constants.
 
 Applicability is explicit and dataset-dependent: the ADNI sample (baseline
-A/T/N biomarkers) runs R1 fully; OASIS-2 has no A/T biomarkers, so severity_A/T
-are neutral and R1 reduces to a neurodegeneration-capacity rule, while R2
-applies to its longitudinal brain-volume feature. The synthetic full-cascade
-study exercises every rule, including A/T/N monotonicity.
+A/T/N biomarkers) runs R1 and R3; it has no longitudinal A or N feature, so
+R2 is inactive there. OASIS-2 has no A/T biomarkers, so severity_A/T are
+neutral and R1 reduces to a neurodegeneration-capacity rule, while R2 applies
+to its longitudinal brain-volume feature. The synthetic cascade study
+exercises R1, R3 and R2 on A and N.
 """
 from __future__ import annotations
 
@@ -45,13 +56,13 @@ SEVERITY_BINS = np.array([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
 
 @dataclass
 class RuleConfig:
-    # noise slack in standardized units per year: allows test-retest/practice
-    # variability (~0.25 sigma is typical for cognitive scales) before a
-    # predicted change counts as a rule violation
+    # R2 minimum noise slack, in standardized units (sigma, NOT per year):
+    # the smallest apparent reversal of an A/N marker tolerated as
+    # measurement noise; the calibrated per-feature slack is never below it
     slack: float = 0.25
     decline_weight: float = 1.0    # weight of R1 in the total penalty
     monotonic_weight: float = 1.0  # weight of R2 in the total penalty
-    rank_weight: float = 0.5       # weight of R3 (causal ordering across patients)
+    rank_weight: float = 0.5       # weight of R3 (population severity-decline ordering)
     rank_margin: float = 0.05      # allowed advantage of low-severity patients, sigma/yr
     r0: float = 0.10               # base capacity floor added to calibrated quantiles
     capacity_quantile: float = 0.90
@@ -283,9 +294,10 @@ class BiologicalRuleEngine:
                 p_idx = torch.tensor(p_idx, device=rate.device, dtype=torch.long)
                 n_pat = len(pid_to_i)
                 has_obs = (V.sum(1) > 0).to(rate.dtype)
-                pat_rate = torch.zeros(n_pat, device=rate.device).index_add_(0, p_idx, rm * has_obs)
-                pat_sev = torch.zeros(n_pat, device=rate.device).index_add_(0, p_idx, sev_mean * has_obs)
-                pat_cnt = torch.zeros(n_pat, device=rate.device).index_add_(0, p_idx, has_obs)
+                zeros = lambda: torch.zeros(n_pat, device=rate.device, dtype=rate.dtype)
+                pat_rate = zeros().index_add_(0, p_idx, rm * has_obs)
+                pat_sev = zeros().index_add_(0, p_idx, sev_mean.to(rate.dtype) * has_obs)
+                pat_cnt = zeros().index_add_(0, p_idx, has_obs)
                 valid = pat_cnt > 0
                 if int(valid.sum()) >= 8:
                     pr = pat_rate[valid] / pat_cnt[valid].clamp(min=1e-6)
@@ -299,7 +311,8 @@ class BiologicalRuleEngine:
         for d, spec in self.monotonic_specs:
             slack_f = self.capacity.noise_slacks.get(spec.name, cfg.slack)
             imp = (cur_std[:, d] - pred_std[:, d]) if spec.higher_is_worse else (pred_std[:, d] - cur_std[:, d])
-            mons.append(F.relu(imp - slack_f * dt.clamp(min=1e-3)))
+            # absolute slack (sigma): noise does not scale with the horizon
+            mons.append(F.relu(imp - slack_f))
             v = torch.ones_like(cur_std[:, d])
             if cur_mask is not None: v = v * cur_mask[:, d]
             mvalids.append(v)
@@ -333,13 +346,13 @@ class BiologicalRuleEngine:
             n, viol = 0, 0
             for b in range(cur_std.shape[0]):
                 for d, spec in self.monotonic_specs:
-                    if not np.isfinite(cur_std[b, d]):
-                        continue
+                    if not (np.isfinite(cur_std[b, d]) and np.isfinite(pred_std[b, d])):
+                        continue  # unmeasured cells are excluded, not auto-passes
                     slack_f = self.capacity.noise_slacks.get(spec.name, cfg.slack)
                     imp = ((cur_std[b, d] - pred_std[b, d]) if spec.higher_is_worse
                            else (pred_std[b, d] - cur_std[b, d]))
                     n += 1
-                    viol += imp > slack_f * max(dt[b], 1e-3)
+                    viol += imp > slack_f
             res["monotonic_violation_rate"] = float(viol / max(n, 1))
         return res
 
