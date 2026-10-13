@@ -5,7 +5,7 @@ PYTHON ?= python3
 # `pip install -e .` from `make setup` was skipped
 export PYTHONPATH := src:$(PYTHONPATH)
 
-.PHONY: setup data test experiments adni oasis ablation clinical results predict
+.PHONY: setup data test cohort experiments adni oasis ablation clinical results predict
 
 setup:
 	$(PYTHON) -m venv .venv && ./.venv/bin/pip install -r requirements.txt && ./.venv/bin/pip install -e .
@@ -15,6 +15,10 @@ data:
 
 test:
 	./.venv/bin/python -m pytest tests/ -q
+
+cohort:
+	./.venv/bin/python scripts/cohort_summary.py --study adni
+	./.venv/bin/python scripts/cohort_summary.py --study oasis
 
 experiments: adni oasis
 

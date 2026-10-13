@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import torch  # noqa: E402
 
 from biojepa.run_experiments import (aggregate, load_study, patient_level_mae_comparison,  # noqa: E402
-                                     run_cv, write_json, environment_manifest)
+                                     run_cv, run_manifest, write_json)
 
 ARMS = {
     "jepa_full": dict(kind="jepa", version="v2", w_bio=0.0, w_lat=1.0, w_std=0.5, w_cov=0.25),
@@ -44,7 +44,7 @@ def run(study_name="synthetic", seeds=(0, 1, 2), folds=5, endpoint=None, max_epo
     feature, horizon = endpoint or DEFAULT_ENDPOINT[study_name]
     study = load_study(study_name)
     cv = run_cv(study, ARMS, seeds=seeds, k_folds=folds, device=torch.device("cpu"),
-                max_epochs=max_epochs)
+                max_epochs=max_epochs, conversion=False)
     primary = patient_level_mae_comparison(cv, "jepa_full", "supervised_control",
                                            feature, horizon, n_boot=n_boot)
     exploratory = {}
@@ -63,7 +63,9 @@ def run(study_name="synthetic", seeds=(0, 1, 2), folds=5, endpoint=None, max_epo
                              **primary},
         "exploratory": exploratory,
         "aggregate": {m: aggregate(cv["per_fold"][m]) for m in ARMS},
-        "environment": environment_manifest(),
+        "split_counts": cv["split_counts"],
+        "manifest": run_manifest(study_name, study, seeds=list(seeds), k_folds=folds,
+                                 max_epochs_override=max_epochs, device="cpu"),
     }
     target = out or os.path.join("experiments", study_name, "latent_ablation.json")
     write_json(target, output)

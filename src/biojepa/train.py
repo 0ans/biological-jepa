@@ -4,14 +4,15 @@ from __future__ import annotations
 import torch
 
 from .model.jepa import build_model
-from .utils import seed_everything
+from .utils import TRAINING_BUDGET as TB
+from .utils import make_optimizer, seed_everything
 
 
-def train_jepa(prepared, device=torch.device("cpu"), seed: int = 0, epochs: int = 400,
-               lr: float = 3e-3, batch: int = 256, patience: int = 60,
+def train_jepa(prepared, device=torch.device("cpu"), seed: int = 0, epochs: int = TB["epochs"],
+               lr: float = TB["lr"], batch: int = TB["batch"], patience: int = TB["patience"],
                w_bio: float = 0.0, ema_momentum: float = 0.99, version: str = "v2",
                w_lat: float = 1.0, w_std: float = 0.5, w_cov: float = 0.25,
-               min_batch: int = 16):
+               min_batch: int = TB["min_batch"]):
     """Train a JEPA model; returns (model, best validation sup_future, last epoch).
 
     Latent-objective weights: w_lat (latent prediction loss), w_std / w_cov
@@ -24,8 +25,7 @@ def train_jepa(prepared, device=torch.device("cpu"), seed: int = 0, epochs: int 
     model = build_model(version, in_dim=prepared.in_dim, step_dim=prepared.step_dim,
                         ctx_dim=prepared.x_context.shape[1],
                         n_dyn=len(study.dyn_specs), ema_momentum=ema_momentum).to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
+    opt, sched = make_optimizer(model.parameters(), lr=lr, epochs=epochs)
 
     train = prepared.pair_tensors("train", device)
     val = prepared.pair_tensors("val", device)

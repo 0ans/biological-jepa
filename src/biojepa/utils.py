@@ -14,6 +14,17 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
 
 
+# One optimization budget for every neural model (JEPA variants and the GRU
+# baseline), so no model wins through a larger training budget.
+TRAINING_BUDGET = dict(epochs=400, lr=3e-3, batch=256, patience=60, min_batch=16)
+
+
+def make_optimizer(params, lr: float, epochs: int, weight_decay: float = 1e-4):
+    """AdamW + cosine learning-rate schedule shared by every neural model."""
+    opt = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
+    return opt, torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
+
+
 def get_device() -> torch.device:
     if torch.backends.mps.is_available():
         return torch.device("mps")

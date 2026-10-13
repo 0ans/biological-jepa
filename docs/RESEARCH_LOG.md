@@ -266,8 +266,9 @@ Statistics and design
   prediction pair's error is averaged over seeds and patients are the unit of
   the bootstrap CI and sign-flip p-value.
 - **Conversion AUC:** baseline-demented subjects (OASIS `Demented`, ADNI
-  `AD`) were negatives; no event window; eligibility required an observed
-  follow-up visit. Now: baseline index, 3-year window, time-aware labels
+  `AD`) could be negatives; the main AUC had no event window; the single-fold
+  T6 (which had a 36-month window) excluded later converters, required an
+  observed 36-month visit and used a different model. Now: baseline index, 3-year window, time-aware labels
   (later converters are event-free controls), baseline dementia excluded,
   forecasts independent of follow-up visits. The single-fold T6 was removed.
 - **Rollout violations** were step-to-step for JEPA but cumulative for the
@@ -285,8 +286,9 @@ Code
 - VICReg terms on the no-gradient EMA target were constants (removed); the
   latent ablation's control kept VICReg (now `w_lat = w_std = w_cov = 0`) and
   became a 5-fold × 3-seed analysis with a pre-specified endpoint.
-- The v3 stress-test path dropped the delta anchor (2.27σ error at 0% extra
-  missingness); all models now forecast through one `forecast()` function.
+- The v3 stress-test path dropped the delta anchor (v3 was not in the main
+  stress test, which used v2 only); all models now forecast through one
+  `forecast()` function, and tests/test_fixes.py checks the anchor.
 - `mlp()` placed activations by width instead of position;
   `subject_split(stratify=False)` produced empty val/test; v1 rule penalty
   ignored the current-visit mask; Ridge/HGB fallbacks averaged imputed zeros;

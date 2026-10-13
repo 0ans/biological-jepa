@@ -24,7 +24,7 @@ The project combines a temporal context encoder, a forecast-horizon-conditioned 
 
 | Status | What it means |
 |---|---|
-| Implemented | History-aware JEPA-inspired architecture, supervised clinical head, biological penalties, baselines with equal inputs and training budget |
+| Implemented | History-aware JEPA-inspired architecture, supervised clinical head, biological penalties; baselines get the same current-visit inputs and horizon (GRU also the history and the same training budget) |
 | Implemented analysis plan | 5-fold × 3-seed subject-level CV, patient-level paired inference, prospective conversion design, latent-objective ablation with a matched supervised control |
 | Tested in code | Rule-engine, statistics, conversion-design and leakage regression tests, plus an end-to-end run of every entry point on synthetic data |
 | Superseded | All pre-audit ADNI / OASIS-2 numbers ([why](experiments/archive/2026-09_pre-audit/README.md)) |
@@ -58,10 +58,11 @@ Check the full pipeline on synthetic data (minutes on a laptop; a pipeline check
 ./.venv/bin/python scripts/latent_ablation.py --study synthetic --seeds 0 --folds 3
 ```
 
-For the real analyses, first review [ADNI access](docs/ADNI_ACCESS.md) and place your licensed ADNI file, then:
+For the real analyses, first review [ADNI access](docs/ADNI_ACCESS.md). The ADNI loader currently reads the abaR-processed table (`data/raw/adnimerge_sample.rda`); data downloaded from LONI as the official `ADNIMERGE` table need a mapping step that is **not implemented yet**, and a file that differs from the pinned hash needs `--allow-unpinned`. Then:
 
 ```bash
 make data            # OASIS-2 download + hash checks of your ADNI file
+make cohort          # cohort table and conversion-design flow from the data
 make experiments     # model comparison, conversion, stress and rollout tests
 make ablation        # primary hypothesis: latent objective vs matched supervised control
 make results         # regenerate docs/RESULTS.md from the artifacts

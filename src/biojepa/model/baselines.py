@@ -17,7 +17,8 @@ import torch
 import torch.nn as nn
 
 from .jepa import masked_mse, mlp
-from ..utils import fourier_time
+from ..utils import TRAINING_BUDGET as TB
+from ..utils import fourier_time, make_optimizer
 
 
 # ----------------------------------------------------------------- GRU model
@@ -162,19 +163,18 @@ def gru_collate(study, pairs, dyn_std_lookup, x_static, dt_dim=8, max_len=None):
 
 
 def train_gru(study, train_pairs, val_pairs, dyn_std_lookup, x_static,
-              device, seed=0, epochs=400, lr=3e-3, batch=256, patience=60,
-              min_batch=16):
+              device, seed=0, epochs=TB["epochs"], lr=TB["lr"], batch=TB["batch"],
+              patience=TB["patience"], min_batch=TB["min_batch"]):
     """Supervised GRU with the SAME optimization budget as the JEPA models
-    (train.train_jepa): AdamW, lr 3e-3, cosine schedule, up to 400 epochs,
-    early stopping with patience 60 on the validation future-value MSE, and
-    batches smaller than 16 skipped."""
+    (utils.TRAINING_BUDGET and utils.make_optimizer: AdamW + cosine schedule,
+    epoch limit, early stopping on the validation future-value MSE, minimum
+    batch size)."""
     from ..utils import seed_everything
     seed_everything(seed)
     D = len(study.dyn_specs)
     dt_dim = 8
     model = GRUProg(step_dim=2 * D + 2 * dt_dim + x_static.shape[1], n_dyn=D).to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
+    opt, sched = make_optimizer(model.parameters(), lr=lr, epochs=epochs)
 
     tr_seq, tr_len = gru_collate(study, train_pairs, dyn_std_lookup, x_static, dt_dim)
     va_seq, va_len = gru_collate(study, val_pairs, dyn_std_lookup, x_static, dt_dim, max_len=tr_seq.shape[1])

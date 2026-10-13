@@ -27,8 +27,9 @@ from collections import defaultdict
 import numpy as np
 import torch
 
-from .data.dataset import subject_kfold
-from .evaluate import (cluster_paired_bootstrap, conversion_analysis, degraded_dyn_lookup,
+from .data.dataset import check_event_timing, subject_kfold
+from .evaluate import (CONVERSION_WINDOW_TOLERANCE, CONVERSION_WINDOW_YEARS,
+                       cluster_paired_bootstrap, conversion_analysis, degraded_dyn_lookup,
                        evaluate_predictions, forecast, gru_rollout, jepa_rollout,
                        paired_auc_bootstrap)
 from .model.baselines import HGBBaseline, RidgeBaseline, ridge_design_matrix, train_gru
@@ -105,19 +106,34 @@ def _sha256(path: str) -> str | None:
     return h.hexdigest()
 
 
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
 def environment_manifest() -> dict:
+    """Code version and software environment of a run. The git state is read
+    from the repository that contains this file, whatever the working dir."""
     import sklearn
     try:
-        commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
-                                text=True, check=True).stdout.strip()
-        dirty = bool(subprocess.run(["git", "status", "--porcelain"], capture_output=True,
-                                    text=True, check=True).stdout.strip())
+        git = lambda *a: subprocess.run(["git", "-C", REPO_ROOT, *a], capture_output=True,
+                                        text=True, check=True).stdout.strip()
+        commit, dirty = git("rev-parse", "HEAD"), bool(git("status", "--porcelain"))
     except Exception:
         commit, dirty = None, None
     return {"git_commit": commit, "git_dirty": dirty, "python": platform.python_version(),
             "torch": torch.__version__, "numpy": np.__version__, "sklearn": sklearn.__version__,
             "platform": platform.platform(),
             "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+
+
+def run_manifest(study_name: str, study, **extra) -> dict:
+    """Provenance block written into EVERY results file: data hash, study
+    size, event-timing check, code commit and software versions."""
+    return {"study": study_name, "n_subjects": len(study.subjects),
+            "features": [s.name for s in study.dyn_specs],
+            # the loaders read data/raw/... relative to the working directory
+            "data_sha256": _sha256(DATA_FILES[study_name]) if study_name in DATA_FILES else None,
+            "event_timing_check": check_event_timing(study),
+            "environment": environment_manifest(), **extra}
 
 
 def resolve_device(name: str) -> torch.device:
@@ -160,8 +176,11 @@ def fit_predict(config, prepared, seed: int, device, max_epochs: int | None = No
 
 # ------------------------------------------------------- cross-validation
 def run_cv(study, configs: dict, seeds=(0, 1, 2), k_folds: int = 5,
-           device=torch.device("cpu"), max_epochs: int | None = None, log=print) -> dict:
-    """Train/evaluate every config on every (seed, fold).
+           device=torch.device("cpu"), max_epochs: int | None = None, log=print,
+           conversion: bool = True) -> dict:
+    """Train/evaluate every config on every (seed, fold). With
+    conversion=False (event timing failed its sanity check) no conversion
+    analysis is run.
 
     Returns per-fold metrics, per-pair absolute errors keyed by
     (patient, input visit, target visit, nominal horizon) with one value per
@@ -171,6 +190,7 @@ def run_cv(study, configs: dict, seeds=(0, 1, 2), k_folds: int = 5,
     errors = {m: defaultdict(lambda: defaultdict(list)) for m in names}  # m -> feat -> key -> [seed errs]
     conv_scores = {m: defaultdict(list) for m in names}                   # m -> sid -> [seed scores]
     conv_labels: dict[str, int] = {}
+    conv_exclusions: dict[str, int] = defaultdict(int)
     runtimes = {m: [] for m in names}
     split_counts = []
     for seed in seeds:
@@ -191,10 +211,14 @@ def run_cv(study, configs: dict, seeds=(0, 1, 2), k_folds: int = 5,
                 pred_std = forecast(cfg, model, prepared, prepared.pairs["test"], device)
                 runtimes[name].append(time.time() - t0)
                 metrics = evaluate_predictions(prepared, "test", pred_std)
-                conv = conversion_analysis(cfg, model, prepared, te, device)
+                conv = conversion_analysis(cfg, model, prepared, te, device) if conversion \
+                    else {"sids": [], "labels": [], "scores": [], "n": 0, "exclusions": {}}
                 if "auc" in conv:
                     metrics["conversion_auc"] = conv["auc"]
                 metrics["conversion_n"] = conv["n"]
+                if name == names[0] and seed == seeds[0]:
+                    for reason, cnt in conv["exclusions"].items():
+                        conv_exclusions[reason] += cnt
                 per_fold[name].append({"seed": seed, "fold": fold, **metrics})
                 pred_raw = prepared.dyn_std.inverse(pred_std)
                 for f_idx, spec in enumerate(study.dyn_specs):
@@ -207,8 +231,9 @@ def run_cv(study, configs: dict, seeds=(0, 1, 2), k_folds: int = 5,
                     conv_labels[sid] = int(y)
             log(f"[{study.name} seed{seed} fold{fold + 1}/{k_folds}] done")
     return {"per_fold": per_fold, "errors": errors, "conv_scores": conv_scores,
-            "conv_labels": conv_labels, "runtimes": runtimes, "split_counts": split_counts,
-            "n_seeds": len(seeds)}
+            "conv_labels": conv_labels, "conv_exclusions": dict(conv_exclusions),
+            "conversion_enabled": conversion, "runtimes": runtimes,
+            "split_counts": split_counts, "n_seeds": len(seeds)}
 
 
 def seed_averaged(records: dict, n_seeds: int) -> dict:
@@ -233,8 +258,18 @@ def patient_level_mae_comparison(cv: dict, a: str, b: str, feature: str,
     keys = sorted(k for k in ea if horizon is None or k[3] == float(horizon))
     r = cluster_paired_bootstrap([ea[k] for k in keys], [eb[k] for k in keys],
                                  [k[0] for k in keys], n_boot=n_boot, seed=0)
-    return {**r, "n_pairs": len(keys), "mae_a": float(np.mean([ea[k] for k in keys])) if keys else None,
-            "mae_b": float(np.mean([eb[k] for k in keys])) if keys else None}
+
+    def patient_weighted(e):  # same estimand as mean_diff: every patient counts once
+        per = defaultdict(list)
+        for k in keys:
+            per[k[0]].append(e[k])
+        return float(np.mean([np.mean(v) for v in per.values()])) if per else None
+
+    return {**r, "n_pairs": len(keys),
+            "mae_a_patient_weighted": patient_weighted(ea),
+            "mae_b_patient_weighted": patient_weighted(eb),
+            "mae_a_pair_weighted": float(np.mean([ea[k] for k in keys])) if keys else None,
+            "mae_b_pair_weighted": float(np.mean([eb[k] for k in keys])) if keys else None}
 
 
 def compare_models(cv: dict, ours: str, opponents: list[str], features: list[str],
@@ -259,11 +294,16 @@ def compare_models(cv: dict, ours: str, opponents: list[str], features: list[str
                 "significant_bonferroni": bool(np.isfinite(r["p"]) and r["p"] < alpha)}
     labels = cv["conv_labels"]
     for opp in opponents:
+        key = f"{ours}_vs_{opp}_conversion_AUC"
+        if not cv.get("conversion_enabled", True):
+            out[key] = {"note": "conversion analysis disabled: event timing failed its check"}
+            continue
         sa = seed_averaged(cv["conv_scores"][ours], n_seeds)
         sb = seed_averaged(cv["conv_scores"][opp], n_seeds)
-        sids = sorted(set(sa) & set(sb))
+        if set(sa) != set(sb):
+            raise ValueError(f"{ours} vs {opp}: conversion subjects differ")
+        sids = sorted(sa)
         y = np.array([labels[s] for s in sids])
-        key = f"{ours}_vs_{opp}_conversion_AUC"
         if len(sids) < 10 or not (0 < y.sum() < len(y)):
             out[key] = {"n": len(sids), "note": "too few subjects or a single class"}
             continue
@@ -305,19 +345,22 @@ def run_study(study_name: str, seeds=(0, 1, 2), k_folds: int = 5,
               max_epochs: int | None = None, n_boot: int = 10000):
     study = load_study(study_name)
     out_dir = os.path.join(out_root, study_name)
-    manifest = {"study": study_name, "n_subjects": len(study.subjects),
-                "features": [s.name for s in study.dyn_specs],
-                "seeds": list(seeds), "k_folds": k_folds,
-                "protocol": f"{k_folds}-fold subject-level CV x {len(seeds)} seeds",
-                "primary_model": PRIMARY_MODEL, "comparators": COMPARATORS,
-                "max_epochs_override": max_epochs, "device": str(device),
-                "data_sha256": _sha256(DATA_FILES[study_name]) if study_name in DATA_FILES else None,
-                "environment": environment_manifest()}
-    cv = run_cv(study, MODEL_CONFIGS, seeds, k_folds, device, max_epochs)
+    manifest = run_manifest(study_name, study, seeds=list(seeds), k_folds=k_folds,
+                            protocol=f"{k_folds}-fold subject-level CV x {len(seeds)} seeds",
+                            primary_model=PRIMARY_MODEL, comparators=COMPARATORS,
+                            max_epochs_override=max_epochs, device=str(device))
+    timing_ok = manifest["event_timing_check"]["valid"]
+    if not timing_ok:
+        print("[warn] event timing failed its sanity check — conversion analysis disabled; "
+              f"details: {manifest['event_timing_check']}")
+    cv = run_cv(study, MODEL_CONFIGS, seeds, k_folds, device, max_epochs, conversion=timing_ok)
     features = [s.name for s in study.dyn_specs]
     result = {
         "manifest": manifest,
         "split_counts": cv["split_counts"],
+        "conversion_design": {"enabled": timing_ok, "window_years": CONVERSION_WINDOW_YEARS,
+                              "tolerance_years": CONVERSION_WINDOW_TOLERANCE,
+                              "exclusions": cv["conv_exclusions"]},
         "aggregate": {m: aggregate(cv["per_fold"][m]) for m in MODEL_NAMES},
         "conversion_pooled": {m: pooled_conversion_auc(cv, m) for m in MODEL_NAMES},
         "per_fold": cv["per_fold"],
@@ -364,6 +407,8 @@ def run_stress_and_rollouts(study_name: str, seed: int = 0, device=torch.device(
     out = {"_meta": {"seed": seed, "fold": 0, "n_test_subjects": len(te),
                      "n_test_pairs": len(prepared.pairs["test"]),
                      "note": "single held-out fold; descriptive, no inference"},
+           "manifest": run_manifest(study_name, study, max_epochs_override=max_epochs,
+                                    device=str(device)),
            "stress_mae": stress, "rollout": rollouts}
     write_json(os.path.join(out_root, study_name, "hard_tests.json"), out)
     return out
@@ -434,12 +479,13 @@ def make_figures(result, hard, study_name, out_root="experiments"):
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(8, 4))
+    # predictions and observed data on the SAME cells (future value observed)
     kinds = [("capacity_violation_rate", "R1: decline beyond capacity", "#c0504d"),
              ("monotonic_violation_rate", "R2: pathology reversal", "#e8a33d")]
-    present = [kv for kv in kinds if any(kv[0] in agg[m] for m in MODEL_NAMES)]
+    present = [kv for kv in kinds if any(f"{kv[0]}_matched" in agg[m] for m in MODEL_NAMES)]
     for j, (k, lbl, col) in enumerate(present):
-        vals = [agg[m].get(k, {}).get("mean", 0.0) for m in MODEL_NAMES]
-        errs = [agg[m].get(k, {}).get("std", 0.0) for m in MODEL_NAMES]
+        vals = [agg[m].get(f"{k}_matched", {}).get("mean", 0.0) for m in MODEL_NAMES]
+        errs = [agg[m].get(f"{k}_matched", {}).get("std", 0.0) for m in MODEL_NAMES]
         off = (j - (len(present) - 1) / 2) * 0.38
         ax.bar(np.arange(len(MODEL_NAMES)) + off, vals, 0.38, yerr=errs, capsize=3, label=lbl, color=col)
         ref = agg[MODEL_NAMES[0]].get(f"observed_{k}")

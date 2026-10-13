@@ -48,6 +48,12 @@ reasoning about the disease — it is exploiting statistical shortcuts.
    actually produces.
 5. `r0 = 0.10` (a small floor) is the only constant, chosen conservatively.
 
+**Known limitation (rate units of the noise margin):** R1 compares decline
+*rates* (σ per year). Measurement noise in a rate scales with 1/Δt, but the
+noise envelope is a single quantile pooled over the 1-, 2- and 3-year
+training pairs, so it is relatively loose at 3 years and tight at 1 year.
+This is a stated design choice; a horizon-specific envelope is future work.
+
 **Known limitation (scalar severity):** severity is summarized as a scalar
 (mean of the A/T/N proxies). Two patients with different biomarker profiles
 can share the same scalar severity — biologically distinct pathways are not

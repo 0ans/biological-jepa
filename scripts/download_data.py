@@ -101,8 +101,11 @@ def main(argv=None):
     verify(ADNI_FILE, args.allow_unpinned)
     import pyreadr
     a = list(pyreadr.read_r(adni).values())[0]
-    required = {"RID", "VISCODE", "YEARS_bl", "DX_bl", "MMSE", "ADAS13", "CDRSB", "CSF_ABETA_bl",
-                "ConvertedToDementia", "TimeUnderRiskDementia"}
+    # every column src/biojepa/data/adni.py reads
+    required = {"RID", "VISCODE", "YEARS_bl", "DX_bl", "MMSE", "ADAS13", "CDRSB",
+                "CSF_ABETA_bl", "PET_ABETA_bl", "CSF_TAU_bl", "CSF_PTAU_bl", "MRI_HIPP_bl",
+                "PET_ABETA_STATUS_bl", "CSF_ABETA_STATUS_bl", "AGE", "GENDER", "EDUCATION",
+                "APOE4", "ConvertedToDementia", "TimeUnderRiskDementia"}
     missing = required - set(a.columns)
     assert not missing, f"ADNI file lacks required columns: {sorted(missing)}"
     assert a["RID"].nunique() >= 2000, "ADNI sample looks wrong"

@@ -27,7 +27,8 @@ import torch
 from .data.dataset import make_pair_sets, subject_kfold
 from .evaluate import forecast
 from .pipeline import prepare
-from .run_experiments import MODEL_CONFIGS, PRIMARY_MODEL, fit_model, load_study, write_json
+from .run_experiments import (MODEL_CONFIGS, PRIMARY_MODEL, fit_model, load_study, run_manifest,
+                              write_json)
 
 MODELS = [PRIMARY_MODEL, "jepa_v2", "gru", "hgb", "ridge", "carry_forward"]
 
@@ -150,7 +151,8 @@ def main(argv=None):
     report["_meta"] = {"fold_seed": args.seed, "study": args.study,
                        "n_test_subjects": len(te), "n_test_pairs": len(test_pairs),
                        "n_test48_pairs": len(p48), "primary_model": PRIMARY_MODEL,
-                       "note": "single held-out fold; descriptive only, no inference"}
+                       "note": "single held-out fold; descriptive only, no inference",
+                       "manifest": run_manifest(args.study, study, max_epochs_override=args.max_epochs)}
     write_json(args.out, report)
     print(json.dumps(report, indent=1, default=str))
     print(f"saved -> {args.out}")

@@ -2,10 +2,12 @@
 
 ## 1. ADNI sample (primary study)
 
-**What:** ADNIMERGE-derived longitudinal table — 2,347 ADNI participants,
-15,598 visit rows, follow-up up to 15.6 years, with baseline amyloid (CSF
-Aβ42 52%, amyloid PET 47%), tau (CSF 52%), hippocampal MRI volumes (84%),
-APOE4 (94%), longitudinal MMSE / ADAS13 / CDR-SB, and conversion labels.
+**What:** ADNIMERGE-derived longitudinal table with baseline amyloid (CSF
+Aβ42, amyloid PET), tau (CSF), hippocampal MRI volume, APOE4, longitudinal
+MMSE / ADAS13 / CDR-SB and conversion labels. The historical abaR copy was
+described as 2,347 participants and 15,598 visit rows; cohort numbers for a
+paper must come from `scripts/cohort_summary.py` run on the file actually
+used (`make cohort`).
 
 **Where the historical copy came from:** the file `adnimerge.rda` as
 redistributed with the `abaR` R package

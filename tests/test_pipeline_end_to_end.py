@@ -42,6 +42,9 @@ def test_every_model_reports_observed_reference_violations(results):
     _, res, _ = results
     for m in rx.MODEL_NAMES:
         assert "observed_capacity_violation_rate" in res["aggregate"][m]
+        assert "capacity_violation_rate_matched" in res["aggregate"][m]
+    assert res["conversion_design"]["enabled"]
+    assert res["manifest"]["event_timing_check"]["valid"]
 
 
 def test_hard_tests_and_figures(results):
@@ -62,6 +65,17 @@ def test_results_report_generator(results, tmp_path):
                    check=True)
     text = target.read_text(encoding="utf-8")
     assert "Generated automatically" in text and "SYNTHETIC" in text
+    assert "epochs capped" in text          # smoke runs are flagged as non-reportable
+
+
+def test_cohort_summary(tmp_path):
+    env = {**os.environ, "PYTHONPATH": os.path.join(ROOT, "src")}
+    subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "cohort_summary.py"),
+                    "--study", "synthetic", "--out-root", str(tmp_path)], check=True, env=env)
+    c = json.loads((tmp_path / "synthetic" / "cohort_summary.json").read_text())
+    d = c["conversion_design"]
+    assert d["eligible"] == d["cases"] + d["controls"] > 0
+    assert c["n_subjects"] == 300
 
 
 def test_latent_ablation_and_clinical_tests_run(tmp_path):

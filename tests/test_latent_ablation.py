@@ -34,7 +34,7 @@ def test_control_arm_is_purely_supervised():
     sup = control["sup_future"] + control["sup_current"]
     assert torch.allclose(control["total"], sup)
     full = model.loss(*args)
-    assert float(full["total"]) > float(control["total"])
+    assert full["total"].item() > control["total"].item()
 
 
 def test_vicreg_terms_only_on_trainable_branch():
@@ -51,7 +51,7 @@ def test_vicreg_terms_only_on_trainable_branch():
         for prm in model.target_encoder.parameters():
             prm.add_(torch.randn_like(prm))
     after = model.loss(*args)
-    assert float(before["std_reg"]) == float(after["std_reg"])
-    assert float(before["cov_reg"]) == float(after["cov_reg"])
-    assert float(before["latent"]) != float(after["latent"])
+    assert before["std_reg"].item() == after["std_reg"].item()
+    assert before["cov_reg"].item() == after["cov_reg"].item()
+    assert before["latent"].item() != after["latent"].item()
     assert before["std_reg"].requires_grad

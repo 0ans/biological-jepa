@@ -14,7 +14,7 @@ This is a research-quality gate, not a checklist to bypass peer review.
 ## Primary hypothesis and statistical rigor
 - [x] **PRIMARY** ablation implemented: identical v2 architecture, JEPA objective vs `w_lat=w_std=w_cov=0`, no bio penalty, matched compute, 5 folds × 3 seeds (`make ablation`).
 - [ ] Run it on licensed data.
-- [x] GRU and all comparators receive the same horizons, inputs and (GRU) training budget.
+- [x] All comparators receive the same horizons, current-visit inputs and baseline context; GRU and JEPA also get the history and share one training budget (Ridge/HGB use the current visit only — state this).
 - [ ] Lock the primary endpoint before running (code default: MMSE @ 12 months) and record the decision with a date.
 - [x] Patient-level 95% bootstrap CIs, sign-flip p-values and unique patient counts are produced automatically.
 - [x] Bonferroni over the full comparison family; single-fold tests labeled descriptive.
@@ -31,7 +31,9 @@ This is a research-quality gate, not a checklist to bypass peer review.
 ## Visuals and reporting
 - [x] Editable high-resolution architecture schematic (`docs/architecture.svg`).
 - [x] Structured publication manuscript draft (`paper/MANUSCRIPT.md`).
-- [x] Reproducible single-split latent objective ablation runner.
+- [x] Latent-objective ablation runner: 5-fold × 3-seed CV, pre-specified endpoint, patient-level inference.
+- [x] Cohort table generated from the data (`scripts/cohort_summary.py`).
+- [ ] Disclose that the cohorts were analysed in exploratory versions before the analysis plan was fixed.
 - [x] Pre-audit results archived with reasons; `docs/RESULTS.md` is generated only from rerun artifacts.
 - [ ] Add dataset flow diagram, patient-counts per split and honest confidence intervals.
 - [ ] Verify all manuscript references, citations, disclosure statements and journal formatting.

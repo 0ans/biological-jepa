@@ -13,6 +13,9 @@ from .utils import fourier_time
 # Pre-specified conversion design (see conversion_queries)
 CONVERSION_FEATURES = ("CDRSB", "CDR", "CDR_like")
 CONVERSION_WINDOW_YEARS = 3.0
+# scheduled visits scatter around their nominal time; the same +-0.25 y
+# tolerance is used to match prediction pairs to horizons (make_pair_sets)
+CONVERSION_WINDOW_TOLERANCE = 0.25
 
 
 # --------------------------------------------------------------- forecasting
@@ -86,10 +89,12 @@ def evaluate_predictions(prepared, split: str, pred_std: np.ndarray) -> dict:
     """Accuracy, rule-violation and subgroup metrics for one model's
     standardized predictions on one split's prediction pairs.
 
-    Violation rates are reported twice: for the predictions, and for the
-    OBSERVED future values of the same pairs (`observed_*`). The rule
-    envelopes are training-data quantiles, so a prediction rate far below the
-    observed rate indicates over-smoothed trajectories, not better biology."""
+    Violation rates: `*_violation_rate` uses every cell observed at the input
+    visit; `*_violation_rate_matched` and `observed_*` use the same cells
+    (future value observed) for the predictions and for the OBSERVED data, so
+    they are directly comparable. The rule envelopes are training-data
+    quantiles, so a prediction rate far below the observed rate indicates
+    over-smoothed trajectories, not better biology."""
     study = prepared.study
     pairs = prepared.pairs[split]
 
@@ -113,7 +118,13 @@ def evaluate_predictions(prepared, split: str, pred_std: np.ndarray) -> dict:
             metrics[f"n_pairs_{spec.name}_h{h:g}"] = int(m.sum())
 
     # ---- biological violation rates: predictions and observed reference ----
+    # all cells observed at the input visit:
     metrics.update(prepared.engine.violation_rates(cur_std, pred_std, dt, sev))
+    # the SAME cells for prediction and observed data (future value observed),
+    # so the two rates are directly comparable:
+    pred_matched = np.where(obs_mask, pred_std, np.nan)
+    metrics.update({f"{k}_matched": v for k, v in
+                    prepared.engine.violation_rates(cur_std, pred_matched, dt, sev).items()})
     metrics.update({f"observed_{k}": v for k, v in
                     prepared.engine.violation_rates(cur_std, truth_std, dt, sev).items()})
 
@@ -121,7 +132,8 @@ def evaluate_predictions(prepared, split: str, pred_std: np.ndarray) -> dict:
     if study.name == "adni" and study.dyn_group_idx.get("C"):
         pet_status = np.array([s.patho_status[0] if len(s.patho_status) else -1
                                for s in study.subjects])
-        pred_rate = prepared.engine.observed_decline_rates(cur_std, pred_std, dt)
+        # predicted and observed rates on the same cells (future value observed)
+        pred_rate = prepared.engine.observed_decline_rates(cur_std, pred_matched, dt)
         true_rate = prepared.engine.observed_decline_rates(cur_std, truth_std, dt)
         for name, arr in [("pred", pred_rate), ("obs", true_rate)]:
             plus_m, minus_m = [], []
@@ -149,61 +161,76 @@ def conversion_feature(study) -> int | None:
     return next((d for d, s in enumerate(study.dyn_specs) if s.name in CONVERSION_FEATURES), None)
 
 
-def conversion_queries(prepared, subject_ids, window: float = CONVERSION_WINDOW_YEARS):
+def conversion_queries(prepared, subject_ids, window: float = CONVERSION_WINDOW_YEARS,
+                       tol: float = CONVERSION_WINDOW_TOLERANCE):
     """Pre-specified prospective conversion design.
 
-    Index = each subject's baseline visit; forecast horizon = `window` years.
-    Eligible: not demented at baseline, known event timing, conversion
-    feature observed at baseline. Label 1 = converted within (0, window];
-    label 0 = event-free through the window (never converted with follow-up
-    >= window, or converted only after it); subjects censored before the
-    window closes are excluded. The forecast needs no follow-up visit, so
-    eligibility never depends on a visit near the horizon being observed.
-    Returns (queries, labels)."""
+    Index = each subject's baseline visit (time 0); forecast horizon =
+    `window` years. Eligible: a baseline visit at time 0, not demented at
+    baseline, known event timing (years from baseline), conversion feature
+    observed at baseline. Label 1 = converted within (0, window + tol];
+    label 0 = event-free through the window, i.e. followed for at least
+    window - tol years without converting inside it (later converters are
+    controls); subjects censored earlier are excluded. `tol` absorbs the
+    scatter of scheduled visits around their nominal time. The forecast needs
+    no follow-up visit, so eligibility never depends on a visit near the
+    horizon being observed.
+
+    Returns (queries, labels, exclusions) — exclusions counts each reason."""
     study = prepared.study
     conv_f = conversion_feature(study)
     queries, labels = [], []
+    excl = {"dementia_at_baseline": 0, "unknown_timing": 0, "no_baseline_visit": 0,
+            "baseline_value_missing": 0, "event_at_baseline": 0, "censored_before_window": 0}
     if conv_f is None:
-        return queries, np.zeros(0, dtype=int)
+        return queries, np.zeros(0, dtype=int), excl
     for s_idx in sorted(subject_ids):
         s = study.subjects[s_idx]
         tur = s.time_under_risk
-        if s.dementia_at_baseline or tur is None or not np.isfinite(tur):
-            continue
-        if not np.isfinite(prepared.dyn_by_subject[s_idx][0, conv_f]):
-            continue
-        if s.converts and tur <= 0:
-            continue  # event at the index visit: not a prospective case
-        if s.converts and tur <= window:
-            y = 1
-        elif tur >= window:
-            y = 0
+        if s.dementia_at_baseline:
+            excl["dementia_at_baseline"] += 1
+        elif tur is None or not np.isfinite(tur):
+            excl["unknown_timing"] += 1
+        elif abs(float(s.times[0])) > 1e-3:
+            excl["no_baseline_visit"] += 1
+        elif not np.isfinite(prepared.dyn_by_subject[s_idx][0, conv_f]):
+            excl["baseline_value_missing"] += 1
+        elif s.converts and tur <= 0:
+            excl["event_at_baseline"] += 1
+        elif s.converts and tur <= window + tol:
+            queries.append({"subject": s_idx, "i": 0, "dt": float(window), "h": float(window)})
+            labels.append(1)
+        elif tur >= window - tol:
+            queries.append({"subject": s_idx, "i": 0, "dt": float(window), "h": float(window)})
+            labels.append(0)
         else:
-            continue  # censored before the window closes
-        queries.append({"subject": s_idx, "i": 0, "dt": float(window), "h": float(window)})
-        labels.append(y)
-    return queries, np.array(labels, dtype=int)
+            excl["censored_before_window"] += 1
+    return queries, np.array(labels, dtype=int), excl
 
 
 def conversion_scores(prepared, queries, pred_std: np.ndarray) -> np.ndarray:
     """Predicted worsening of the conversion feature from the observed
-    baseline value (standardized units; higher = more risk)."""
+    baseline value, in RAW units (comparable across folds and seeds, whose
+    standardizers differ; higher = more risk)."""
     study = prepared.study
     conv_f = conversion_feature(study)
-    cur = np.array([prepared.dyn_by_subject[q["subject"]][q["i"], conv_f] for q in queries])
-    delta = pred_std[:, conv_f] - cur
+    cur_std = np.stack([prepared.dyn_by_subject[q["subject"]][q["i"]] for q in queries])
+    pred_raw = prepared.dyn_std.inverse(pred_std)[:, conv_f]
+    cur_raw = prepared.dyn_std.inverse(cur_std)[:, conv_f]
+    delta = pred_raw - cur_raw
     return delta if study.dyn_specs[conv_f].higher_is_worse else -delta
 
 
 def conversion_analysis(config, model, prepared, subject_ids, device=torch.device("cpu"),
                         window: float = CONVERSION_WINDOW_YEARS) -> dict:
-    """Scores, labels and subject ids for the prospective conversion design,
-    plus the AUC when both classes are present."""
+    """Scores, labels, subject ids and exclusion counts for the prospective
+    conversion design, plus the AUC when both classes are present."""
     from sklearn.metrics import roc_auc_score
-    queries, labels = conversion_queries(prepared, subject_ids, window)
+    queries, labels, excl = conversion_queries(prepared, subject_ids, window)
     out = {"sids": [prepared.study.subjects[q["subject"]].sid for q in queries],
            "labels": labels, "scores": np.zeros(0), "window_years": window,
-           "n": len(queries), "n_cases": int(labels.sum()) if len(labels) else 0}
+           "n": len(queries), "n_cases": int(labels.sum()) if len(labels) else 0,
+           "exclusions": excl}
     if not queries:
         return out
     scores = conversion_scores(prepared, queries,

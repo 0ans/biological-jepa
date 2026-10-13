@@ -35,7 +35,18 @@ def _num(x, nd=3, signed=False):
     return f"{x:+.{nd}f}" if signed else f"{x:.{nd}f}"
 
 
-def study_section(name, res, hard, ablation):
+def cohort_lines(c):
+    d = c["conversion_design"]
+    return ["### Cohort (from `cohort_summary.json`)", "",
+            f"- {c['n_subjects']} subjects, {c['n_visit_rows']} visits; follow-up median "
+            f"{c['follow_up_years']['median']} y (max {c['follow_up_years']['max']} y)",
+            f"- Baseline groups: {c['baseline_group_counts']}; dementia at baseline: "
+            f"{c['dementia_at_baseline']}; converters during follow-up: {c['converters']}",
+            f"- Conversion design ({d['window_years']:g}-year window): {d['eligible']} eligible "
+            f"({d['cases']} cases, {d['controls']} controls); excluded: {d['excluded']}", ""]
+
+
+def study_section(name, res, hard, ablation, cohort=None):
     m = res["manifest"]
     env = m.get("environment", {})
     lines = [f"## {name.upper()}", ""]
@@ -48,7 +59,14 @@ def study_section(name, res, hard, ablation):
     if m.get("max_epochs_override"):
         lines.append(f"- **WARNING: epochs capped at {m['max_epochs_override']} — "
                      "pipeline check only, not reportable evidence.**")
+    timing = m.get("event_timing_check", {})
+    if timing and not timing.get("valid"):
+        lines.append(f"- **WARNING: event timing failed its sanity check "
+                     f"({timing.get('n_inconsistent')}/{timing.get('n_checked')} inconsistent); "
+                     "conversion analysis was disabled.**")
     lines.append("")
+    if cohort:
+        lines += cohort_lines(cohort)
 
     agg = res["aggregate"]
     models = list(agg)
@@ -63,8 +81,11 @@ def study_section(name, res, hard, ablation):
                                                   for h in (1, 2, 3)) + " |")
     lines.append("")
 
+    design = res.get("conversion_design", {})
     lines += ["### Prospective conversion (baseline index, fixed window, time-aware labels; "
               "seed-averaged patient scores pooled over folds)", "",
+              f"Window {design.get('window_years', '—')} y (± {design.get('tolerance_years', '—')} y); "
+              f"exclusions in the first seed: {design.get('exclusions', {})}", "",
               "| Model | AUC | patients | converters |", "|---|---|---|---|"]
     for mod, c in res["conversion_pooled"].items():
         lines.append(f"| {mod} | {_num(c.get('auc'))} | {c.get('n', 0)} | {c.get('n_cases', '—')} |")
@@ -73,13 +94,14 @@ def study_section(name, res, hard, ablation):
     lines += ["### Rule-violation rates (predictions vs the observed data)", "",
               "The envelopes are training-data quantiles: a prediction rate far below the "
               "observed-data rate means over-smoothed trajectories, not better biology.", "",
-              "| Model | R1 capacity | R1 observed data | R2 reversal | R2 observed data |",
+              "Both columns of each rule use the same cells (future value observed).", "",
+              "| Model | R1 prediction | R1 observed data | R2 prediction | R2 observed data |",
               "|---|---|---|---|---|"]
     for mod in models:
         a = agg[mod]
-        lines.append(f"| {mod} | {_ms(a, 'capacity_violation_rate')} | "
+        lines.append(f"| {mod} | {_ms(a, 'capacity_violation_rate_matched')} | "
                      f"{_ms(a, 'observed_capacity_violation_rate')} | "
-                     f"{_ms(a, 'monotonic_violation_rate')} | "
+                     f"{_ms(a, 'monotonic_violation_rate_matched')} | "
                      f"{_ms(a, 'observed_monotonic_violation_rate')} |")
     lines.append("")
 
@@ -88,22 +110,25 @@ def study_section(name, res, hard, ablation):
     lines += [f"### Paired comparisons — {fam['ours']} vs comparators "
               f"(unit: {fam['unit']}; Bonferroni α = {fam['bonferroni_alpha']:.5f} "
               f"over {fam['n_tests']} tests)", "",
-              "| Comparison | Difference (ours − comparator) | 95% CI | p | patients | Bonferroni |",
-              "|---|---|---|---|---|---|"]
+              "| Comparison | Ours | Comparator | Difference (ours − comparator) | 95% CI | p | patients | Bonferroni |",
+              "|---|---|---|---|---|---|---|---|"]
     for k, v in sig.items():
         if k.startswith("_"):
             continue
         if "auc_a" in v:
-            diff, n = v.get("mean_diff"), v.get("n")
+            a_val, b_val, diff, n = v.get("auc_a"), v.get("auc_b"), v.get("mean_diff"), v.get("n")
         elif "mean_diff" in v:
+            a_val, b_val = v.get("mae_a_patient_weighted"), v.get("mae_b_patient_weighted")
             diff, n = v.get("mean_diff"), v.get("n_clusters")
         else:
-            lines.append(f"| {k} | {v.get('note', 'not estimable')} | | | | |")
+            lines.append(f"| {k} | {v.get('note', 'not estimable')} | | | | | | |")
             continue
         flag = "significant" if v.get("significant_bonferroni") else "not significant"
-        lines.append(f"| {k} | {_num(diff, 4, True)} | [{_num(v.get('ci_low'), 4, True)}, "
-                     f"{_num(v.get('ci_high'), 4, True)}] | {_num(v.get('p'), 4)} | {n} | {flag} |")
-    lines += ["", "MAE rows: negative difference favors ours. AUC rows: positive difference "
+        lines.append(f"| {k} | {_num(a_val)} | {_num(b_val)} | {_num(diff, 4, True)} | "
+                     f"[{_num(v.get('ci_low'), 4, True)}, {_num(v.get('ci_high'), 4, True)}] | "
+                     f"{_num(v.get('p'), 4)} | {n} | {flag} |")
+    lines += ["", "MAE rows: patient-weighted MAE (every patient counts once, errors averaged "
+              "over seeds); negative difference favors ours. AUC rows: positive difference "
               "favors ours.", ""]
 
     if ablation:
@@ -111,7 +136,8 @@ def study_section(name, res, hard, ablation):
         lines += ["### Primary hypothesis — latent-objective ablation", "",
                   f"Endpoint (pre-specified): {p['feature']} at {p['horizon_years']:g} years; "
                   f"{p['comparison']}.", "",
-                  f"- MAE jepa_full {_num(p.get('mae_a'))} vs supervised_control {_num(p.get('mae_b'))}",
+                  f"- Patient-weighted MAE: jepa_full {_num(p.get('mae_a_patient_weighted'))} vs "
+                  f"supervised_control {_num(p.get('mae_b_patient_weighted'))}",
                   f"- Difference {_num(p.get('mean_diff'), 4, True)}, 95% CI "
                   f"[{_num(p.get('ci_low'), 4, True)}, {_num(p.get('ci_high'), 4, True)}], "
                   f"p = {_num(p.get('p'), 4)}, {p.get('n_clusters')} patients", ""]
@@ -153,7 +179,8 @@ def main():
         found = True
         lines += study_section(name, res,
                                _load(os.path.join(args.root, name, "hard_tests.json")),
-                               _load(os.path.join(args.root, name, "latent_ablation.json")))
+                               _load(os.path.join(args.root, name, "latent_ablation.json")),
+                               _load(os.path.join(args.root, name, "cohort_summary.json")))
     if found:
         lines += ["## Interpretation limits", "",
                   "- Mean ± SD over (seed, fold) runs is descriptive; runs share patients.",
