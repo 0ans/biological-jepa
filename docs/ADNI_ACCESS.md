@@ -2,29 +2,53 @@
 
 ## 1. ADNI sample (primary study)
 
-**What:** ADNIMERGE-style longitudinal table — 2,347 real ADNI participants,
-15,598 visit rows, follow-up up to 15.6 years, with baseline amyloid (CSF
-Aβ42 52%, amyloid PET 47%), tau (CSF 52%), hippocampal MRI volumes (84%),
-APOE4 (94%), longitudinal MMSE / ADAS13 / CDR-SB, and conversion labels.
+**What:** ADNIMERGE-derived longitudinal table with baseline amyloid (CSF
+Aβ42, amyloid PET), tau (CSF), hippocampal MRI volume, APOE4, longitudinal
+MMSE / ADAS13 / CDR-SB and conversion labels. The historical abaR copy was
+described as 2,347 participants and 15,598 visit rows; cohort numbers for a
+paper must come from `scripts/cohort_summary.py` run on the file actually
+used (`make cohort`).
 
-**Where it came from (this repository):** the file `adnimerge.rda` as
+**Where the historical copy came from:** the file `adnimerge.rda` as
 redistributed with the `abaR` R package
-(https://github.com/ncullen93/abaR, `data/adnimerge.rda`), which processed it
-from ADNI's ADNIMERGE derivative. `scripts/download_data.py` fetches and
-verifies it; the file itself is NOT committed to this repository.
+(https://github.com/ncullen93/abaR, `data/adnimerge.rda`), processed from
+ADNI's ADNIMERGE table. This is a **third-party copy** of participant-level
+ADNI data.
 
-**Getting the full ADNI (recommended for production results):**
-1. Register at https://adni.loni.usc.edu (free for researchers).
-2. Agree to the ADNI Data Use Agreement
+**What is required for a publication:**
+1. Register at https://adni.loni.usc.edu and obtain approval under the ADNI
+   Data Use Agreement
    (http://adni.loni.usc.edu/wp-content/uploads/how_to_apply/ADNI_Data_Use_Agreement.pdf).
-3. Download `ADNIMERGE.csv` (and imaging, if desired) from the LONI/IDA portal.
-4. The loader in `src/biojepa/data/adni.py` targets the ADNIMERGE schema;
-   point it at your file and the full A/T/N trajectory rules activate
-   (longitudinal PET/MRI biomarkers enable R2 on real data — see
-   docs/BIOLOGICAL_RULES.md).
+2. Download the data through your own LONI/IDA account.
+3. Confirm with the DUA (or with ADNI) whether results derived from the
+   third-party abaR copy are acceptable; the safest path is to rerun every
+   experiment on data you downloaded yourself.
+4. Follow the DUA's publication requirements — they include review of the
+   manuscript by the ADNI Data and Publications Committee and the standard
+   ADNI acknowledgement and funding statement. Check the current DUA text
+   before submission.
+5. Do not send participant-level ADNI data to third-party services (for
+   example general-purpose chatbots) unless the DUA explicitly allows it.
 
-**Terms:** ADNI data are governed by the ADNI Data Use Agreement; redistribution
-of participant-level data is restricted. This repository ships code only.
+`scripts/download_data.py` therefore does **not** download ADNI data by
+default; it only verifies a file you placed at `data/raw/adnimerge_sample.rda`.
+The abaR copy can be fetched with `--adni-from-abar` only if you have
+confirmed that your approval covers it.
+
+**Schema the loader expects:** `src/biojepa/data/adni.py` reads the
+abaR-processed column names (`RID`, `VISCODE`, `YEARS_bl`, `DX_bl`, `MMSE`,
+`ADAS13`, `CDRSB`, `CSF_ABETA_bl`, `PET_ABETA_bl`, `CSF_TAU_bl`, `CSF_PTAU_bl`,
+`MRI_HIPP_bl`, `PET_ABETA_STATUS_bl`, `CSF_ABETA_STATUS_bl`, `AGE`, `GENDER`,
+`EDUCATION`, `APOE4`, `ConvertedToDementia`, `TimeUnderRiskDementia`). The
+official LONI `ADNIMERGE` table uses different column names and units and has
+no ready-made conversion-timing or amyloid-status columns, so a documented
+mapping step (not yet implemented) is needed before the loader can read it.
+Baseline diagnoses `AD` / `Dementia` are treated as dementia at baseline and
+excluded from conversion analyses.
+
+**Terms:** ADNI data are governed by the ADNI Data Use Agreement;
+redistribution of participant-level data is restricted. This repository
+ships code only.
 
 ## 2. OASIS-2 longitudinal (secondary study)
 
@@ -34,23 +58,33 @@ whole-brain volume (nWBV); no amyloid/tau biomarkers.
 
 **Where it came from (this repository):** the widely redistributed
 `oasis_longitudinal.csv` (Kaggle "MRI and Alzheimers" derivative, jboysen),
-fetched here from a public research-repository mirror
+fetched from a public research-repository mirror
 (https://raw.githubusercontent.com/KrishKPs/Alzimers_Prediction/HEAD/data/oasis_longitudinal.csv).
-`scripts/download_data.py` fetches and verifies it; not committed here.
+`scripts/download_data.py` fetches and verifies it; it is not committed here.
 
-**Note on access:** the official OASIS distribution has moved behind NITRC
-registration + DUA (https://sites.wustl.edu/oasisbrains/). For a
-production-grade OASIS-2 run, register at NITRC and download the original
-files; the loader (`src/biojepa/data/oasis.py`) matches the standard schema.
+**Note on access:** the official OASIS distribution is behind NITRC
+registration and data use terms (https://sites.wustl.edu/oasisbrains/). For a
+publication, download the original files there, follow the OASIS
+acknowledgement requirements, and verify the hash recorded in each
+`results.json` manifest.
+
+**Conversion timing:** OASIS-2 has no event-time column. Converters
+(`Group == "Converted"`) get the first follow-up visit with CDR ≥ 0.5 as the
+conversion time; non-converters are censored at their last visit; subjects
+with `Group == "Demented"` are dementia at baseline and excluded from
+conversion analyses.
 
 ## 3. Synthetic cascade (method verification)
 
 Generated by `src/biojepa/data/synthetic.py` following Jack et al. 2010/2013
-dynamics. Not real data — used ONLY to verify the biological rule engine
-against known ground truth in the test suite. Clearly labeled everywhere.
+dynamics. Not real data — used ONLY to verify the rule engine and the
+pipeline against known ground truth in the test suite. Clearly labeled
+everywhere.
 
 ## Verification checklist (run automatically)
 
-`scripts/download_data.py` asserts: OASIS ≥ 370 rows / ≥ 150 subjects; ADNI
-≥ 2,000 subjects with required columns present; SHA-256 hashes are printed
-for reproducibility.
+`scripts/download_data.py` checks SHA-256 hashes against the pinned values
+(or records yours with `--allow-unpinned`), OASIS ≥ 370 rows / ≥ 150 subjects,
+and ADNI ≥ 2,000 subjects with every column the loader needs. Each
+`results.json` manifest stores the data hash, git commit and software
+versions of the run.

@@ -29,6 +29,24 @@ _DYN_COLS = ["MMSE", "CDR", "nWBV"]
 _STATIC_COLS = ["Age", "EDUC", "SES", "eTIV"]  # sex handled separately as binary
 
 
+def _time_under_risk(times: np.ndarray, cdr: np.ndarray, group: str,
+                     converts: bool) -> float | None:
+    """OASIS-2 has no event-time column. Converters ("nondemented at the
+    initial visit, demented at a later visit") get the first follow-up visit
+    with CDR >= 0.5; non-converters get their last visit time (censoring).
+    Undeterminable timing (no qualifying visit, or CDR >= 0.5 already at
+    baseline) returns None, which excludes the subject from conversion
+    analyses. Baseline-demented subjects are never at risk."""
+    if group == "Demented":
+        return None
+    if converts:
+        hit = np.where(np.isfinite(cdr) & (cdr >= 0.5))[0]
+        if len(hit) == 0 or hit[0] == 0:
+            return None
+        return float(times[hit[0]])
+    return float(times[-1])
+
+
 def load_oasis(path: str = DATA_PATH) -> Study:
     df = pd.read_csv(path)
     df = df.rename(columns={"Subject ID": "sid", "M/F": "sex"})
@@ -44,6 +62,8 @@ def load_oasis(path: str = DATA_PATH) -> Study:
             g[["Age", "EDUC", "SES", "eTIV"]].iloc[0].to_numpy(dtype=np.float32),
             [g["sex_num"].iloc[0]],
         ])
+        group = str(g["Group"].iloc[0])
+        converts = bool((g["Group"] == "Converted").any())
         subjects.append(Subject(
             sid=str(sid),
             times=times,
@@ -51,8 +71,11 @@ def load_oasis(path: str = DATA_PATH) -> Study:
             static=static.astype(np.float32),
             patho=np.zeros(0, dtype=np.float32),
             patho_status=np.zeros(0, dtype=np.float32),
-            group=str(g["Group"].iloc[0]),
-            converts=bool((g["Group"] == "Converted").any()),
+            group=group,
+            converts=converts,
+            time_under_risk=_time_under_risk(times, g["CDR"].to_numpy(dtype=np.float32),
+                                             group, converts),
+            dementia_at_baseline=group == "Demented",
         ))
     return Study(
         name="oasis",

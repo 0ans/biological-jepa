@@ -17,7 +17,8 @@ import torch
 import torch.nn as nn
 
 from .jepa import masked_mse, mlp
-from ..utils import fourier_time
+from ..utils import TRAINING_BUDGET as TB
+from ..utils import fourier_time, make_optimizer
 
 
 # ----------------------------------------------------------------- GRU model
@@ -30,31 +31,35 @@ class GRUProg(nn.Module):
     def forward(self, seq, lengths):
         out, _ = self.gru(seq)
         idx = (lengths - 1).clamp(min=0)
-        last = out[torch.arange(out.shape[0]), idx]
+        last = out[torch.arange(out.shape[0], device=out.device), idx]
         return self.head(last)
 
 
 # ------------------------------------------------------------- carry-forward
-def carry_forward_predict(study, pairs, train_subject_ids):
-    """Predict each feature's last observed raw value at or before visit i.
-    Never-observed features fall back to the train-cohort mean."""
+def last_observed_values(study, pairs, train_subject_ids) -> np.ndarray:
+    """Each feature's last observed raw value at or before visit i (only the
+    input history is used, so `pairs` need no target visit). Never-observed
+    features fall back to the train-cohort mean."""
     train_ids = list(train_subject_ids)
     train_dyn = np.concatenate([study.subjects[k].dyn for k in train_ids], axis=0)
     feat_mean = np.nanmean(train_dyn, axis=0)
-
-    preds, truths, masks, hs = [], [], [], []
+    preds = []
     for pair in pairs:
-        s = study.subjects[pair["subject"]]
-        hist = s.dyn[: pair["i"] + 1]
-        last_obs = np.array([
+        hist = study.subjects[pair["subject"]].dyn[: pair["i"] + 1]
+        preds.append(np.array([
             hist[np.isfinite(hist[:, d]), d][-1] if np.isfinite(hist[:, d]).any() else feat_mean[d]
             for d in range(hist.shape[1])
-        ], dtype=np.float64)
-        preds.append(last_obs)
-        truths.append(s.dyn[pair["j"]])
-        masks.append(np.isfinite(s.dyn[pair["j"]]).astype(int))
-        hs.append(pair["h"])
-    return np.array(preds), np.array(truths), np.array(masks), np.array(hs)
+        ], dtype=np.float64))
+    return np.array(preds).reshape(len(pairs), len(study.dyn_specs))
+
+
+def carry_forward_predict(study, pairs, train_subject_ids):
+    """Carry-forward predictions plus the targets they are scored against."""
+    preds = last_observed_values(study, pairs, train_subject_ids)
+    truths = np.array([study.subjects[p["subject"]].dyn[p["j"]] for p in pairs])
+    masks = np.isfinite(truths).astype(int)
+    hs = np.array([p["h"] for p in pairs])
+    return preds, truths, masks, hs
 
 
 # --------------------------------------------------------------------- ridge
@@ -89,8 +94,8 @@ class RidgeBaseline:
             r = Ridge(alpha=self.alpha)
             if m.sum() >= 5:
                 r.fit(X[m], Y[m, d])
-            else:
-                r.fit(X, np.full(len(X), Y[:, d].mean() if np.isfinite(Y[:, d]).any() else 0.0))
+            else:  # too few observed targets: constant = mean of OBSERVED targets
+                r.fit(X, np.full(len(X), float(Y[m, d].mean()) if m.any() else 0.0))
             self.models.append(r)
 
     def predict(self, X):
@@ -115,8 +120,8 @@ class HGBBaseline:
             r = HistGradientBoostingRegressor(**self.params)
             if m.sum() >= 20:
                 r.fit(X[m], Y[m, d])
-            else:
-                r.fit(X, np.full(len(X), Y[:, d].mean() if np.isfinite(Y[:, d]).any() else 0.0))
+            else:  # too few observed targets: constant = mean of OBSERVED targets
+                r.fit(X, np.full(len(X), float(Y[m, d].mean()) if m.any() else 0.0))
             self.models.append(r)
 
     def predict(self, X):
@@ -158,13 +163,18 @@ def gru_collate(study, pairs, dyn_std_lookup, x_static, dt_dim=8, max_len=None):
 
 
 def train_gru(study, train_pairs, val_pairs, dyn_std_lookup, x_static,
-              device, seed=0, epochs=200, lr=3e-3, batch=256, patience=25):
+              device, seed=0, epochs=TB["epochs"], lr=TB["lr"], batch=TB["batch"],
+              patience=TB["patience"], min_batch=TB["min_batch"]):
+    """Supervised GRU with the SAME optimization budget as the JEPA models
+    (utils.TRAINING_BUDGET and utils.make_optimizer: AdamW + cosine schedule,
+    epoch limit, early stopping on the validation future-value MSE, minimum
+    batch size)."""
     from ..utils import seed_everything
     seed_everything(seed)
     D = len(study.dyn_specs)
     dt_dim = 8
     model = GRUProg(step_dim=2 * D + 2 * dt_dim + x_static.shape[1], n_dyn=D).to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    opt, sched = make_optimizer(model.parameters(), lr=lr, epochs=epochs)
 
     tr_seq, tr_len = gru_collate(study, train_pairs, dyn_std_lookup, x_static, dt_dim)
     va_seq, va_len = gru_collate(study, val_pairs, dyn_std_lookup, x_static, dt_dim, max_len=tr_seq.shape[1])
@@ -186,11 +196,12 @@ def train_gru(study, train_pairs, val_pairs, dyn_std_lookup, x_static,
         perm = torch.randperm(n, device=device)
         for lo in range(0, n, batch):
             idx = perm[lo: lo + batch]
-            if len(idx) < 8:
+            if len(idx) < min_batch:
                 continue
             pred = model(tr_seq_t[idx], tr_len_t[idx])
             loss = masked_mse(pred, tr_y_t[idx], tr_m_t[idx])
             opt.zero_grad(); loss.backward(); opt.step()
+        sched.step()
         model.eval()
         with torch.no_grad():
             pred = model(va_seq_t, va_len_t)

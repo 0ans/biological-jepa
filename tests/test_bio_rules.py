@@ -5,10 +5,11 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import numpy as np
+import pytest
 import torch
 
 from biojepa.data.synthetic import simulate_cascade
-from biojepa.model.bio_rules import compute_severity
+from biojepa.model.bio_rules import BiologicalRuleEngine, RuleConfig, compute_severity
 from biojepa.data.dataset import make_pair_sets, subject_split
 from biojepa.pipeline import prepare
 
@@ -21,9 +22,11 @@ def _engine_and_lookup(seed=0):
 
 def test_split_has_no_subject_leakage():
     study = simulate_cascade(n_subjects=60, seed=1)
-    tr, va, te = subject_split(study, seed=1)
-    assert not (tr & va) and not (tr & te) and not (va & te)
-    assert len(tr) + len(va) + len(te) == len(study.subjects)
+    for stratify in (True, False):
+        tr, va, te = subject_split(study, seed=1, stratify=stratify)
+        assert not (tr & va) and not (tr & te) and not (va & te)
+        assert len(tr) + len(va) + len(te) == len(study.subjects)
+        assert len(va) > 0 and len(te) > 0, f"empty val/test with stratify={stratify}"
 
 
 def test_pairs_are_temporally_valid():
@@ -108,29 +111,41 @@ def test_pathology_reversal_is_penalized():
     assert rates["monotonic_violation_rate"] > 0.5
 
 
+def _r3_only_engine(study, prepared):
+    """Engine with R1/R2 switched off, so a test isolates R3."""
+    return BiologicalRuleEngine(study, prepared.engine.capacity,
+                                RuleConfig(decline_weight=0.0, monotonic_weight=0.0, rank_weight=1.0))
+
+
+def _with_rates(study, t, rates):
+    """Predictions declining at `rates` (sigma/yr, worse direction) on every
+    clinical feature, starting from the current state."""
+    pred = t["dyn_i"].clone()
+    for d in study.dyn_group_idx["C"]:
+        sign = 1.0 if study.dyn_specs[d].higher_is_worse else -1.0
+        pred[:, d] = t["dyn_i"][:, d] + sign * rates * t["dt"]
+    return pred
+
+
 def test_causal_ranking_rule():
-    """R3: a batch where low-severity patients are predicted to decline FASTER
-    than high-severity patients violates causal ordering and is penalized."""
+    """R3 alone: predicting faster decline for LOW-severity patients than for
+    high-severity ones is penalized; the severity-consistent ordering is not."""
     study, prepared = _engine_and_lookup()
     t = prepared.pair_tensors("val")
-    engine = prepared.engine
+    engine = _r3_only_engine(study, prepared)
     sev = t["severity"]
-    sev_mean = sev.mean(dim=1)
-    B = sev.shape[0]
-    k = max(4, B // 4)
-    low_idx = (-sev_mean).topk(k).indices
-
-    pen_ok = float(engine.penalty(t["dyn_i"], t["dyn_j"].clone(), t["dt"], sev)["total"])
-
-    pred_inverted = t["dyn_j"].clone()
-    c_idx = study.dyn_group_idx["C"]
-    for d in c_idx:
-        if study.dyn_specs[d].higher_is_worse:
-            pred_inverted[low_idx, d] += 1.2 * t["dt"][low_idx]
-        else:
-            pred_inverted[low_idx, d] -= 1.2 * t["dt"][low_idx]
-    pen_bad = float(engine.penalty(t["dyn_i"], pred_inverted, t["dt"], sev)["total"])
-    assert pen_bad > 2 * max(pen_ok, 1e-6), f"R3 did not fire: {pen_bad} vs {pen_ok}"
+    s = sev.mean(dim=1)
+    pids = t["patient_ids"]
+    consistent = engine.penalty(t["dyn_i"], _with_rates(study, t, 2.0 * s), t["dt"], sev,
+                                patient_ids=pids)
+    inverted = engine.penalty(t["dyn_i"], _with_rates(study, t, 2.0 * (1.0 - s)), t["dt"], sev,
+                              patient_ids=pids)
+    assert "rank_order" in consistent and "rank_order" in inverted
+    assert float(consistent["rank_order"]) == 0.0
+    assert float(inverted["rank_order"]) > 0.0
+    # R3 aggregates per patient, so it needs patient ids
+    no_ids = engine.penalty(t["dyn_i"], _with_rates(study, t, 2.0 * (1.0 - s)), t["dt"], sev)
+    assert "rank_order" not in no_ids
 
 
 def test_severity_directions():
@@ -144,58 +159,76 @@ def test_severity_directions():
     assert np.mean(sevs["Apos"]) > np.mean(sevs["Aneg"]) + 0.1
 
 
-def test_rules_constrain_prediction_without_future_truth():
-    """Rules constrain the PREDICTION itself: the penalty must not depend on
-    the future ground truth at all (regression test for the fut_mask-gating
-    bug)."""
+def test_bio_penalty_ignores_future_truth():
+    """Rules constrain the PREDICTION: inside the model loss the biological
+    penalty must not change when the future ground truth is scrambled or
+    hidden (regression test for the fut_mask-gating bug)."""
+    from biojepa.model.jepa import BioJEPA2
     study, prepared = _engine_and_lookup()
     t = prepared.pair_tensors("val")
-    engine = prepared.engine
-    pred = t["dyn_j"].clone()
-    low_bio = t["severity"].mean(dim=1) < 0.30
-    assert low_bio.any()
-    for d in study.dyn_group_idx["C"]:
-        if study.dyn_specs[d].higher_is_worse:
-            pred[low_bio, d] += 5.0 * t["dt"][low_bio]
-        else:
-            pred[low_bio, d] -= 5.0 * t["dt"][low_bio]
-    p_a = float(engine.penalty(t["dyn_i"], pred, t["dt"], t["severity"],
-                               cur_mask=torch.ones_like(t["mask_i"]))["decline_capacity"])
-    # same cur and same pred — future truth never enters the equation
-    p_b = float(engine.penalty(t["dyn_i"], pred, t["dt"], t["severity"],
-                               cur_mask=torch.ones_like(t["mask_i"]))["decline_capacity"])
-    assert p_a == p_b > 0, "penalty must be a pure function of (cur, prediction)"
+    torch.manual_seed(0)
+    model = BioJEPA2(prepared.step_dim, prepared.x_context.shape[1], len(study.dyn_specs))
+    common = (t["seq_i"], t["len_i"], t["seq_j"], t["len_j"], t["ctx"], t["dt_feat"])
+    kw = dict(rule_engine=prepared.engine, severity=t["severity"], dt=t["dt"], w_bio=1.0,
+              patient_ids=t["patient_ids"])
+    real = model.loss(*common, t["dyn_j"], t["mask_j"], t["dyn_i"], t["mask_i"], **kw)
+    scrambled = model.loss(*common, 5.0 * torch.randn_like(t["dyn_j"]), torch.zeros_like(t["mask_j"]),
+                           t["dyn_i"], t["mask_i"], **kw)
+    assert real["sup_future"].item() != scrambled["sup_future"].item()  # the truth did change
+    assert real["bio_total"].item() == scrambled["bio_total"].item() > 0
 
 
-def test_r3_unique_patients_and_masks():
-    """R3 operates on unique patients (a patient with 6 pairs counts once) and
-    contributes nothing when no cells are observed."""
+def test_r3_counts_each_patient_once_and_ignores_unobserved_cells():
     study, prepared = _engine_and_lookup()
     t = prepared.pair_tensors("val")
-    engine = prepared.engine
+    engine = _r3_only_engine(study, prepared)
     sev = t["severity"]
-    B = sev.shape[0]
-    # 12 items from only two patients: 6 pairs high-severity, 6 low
-    ids = (["P_high"] * 6 + ["P_low"] * 6)[:B]
-    if len(ids) < B:
-        ids = ids + [f"P_fill_{k}" for k in range(B - len(ids))]
-    ids = torch.tensor([hash(x) % 10_000 for x in ids])
-    # low-severity patient predicted to decline faster -> ordering violation
-    pred = t["dyn_j"].clone()
-    low = torch.zeros(B, dtype=torch.bool)
-    low[[i for i, x in enumerate(ids.tolist()) if x == ids[6].item()]] = True
-    for d in study.dyn_group_idx["C"]:
-        if study.dyn_specs[d].higher_is_worse:
-            pred[low, d] += 2.0 * t["dt"][low]
-        else:
-            pred[low, d] -= 2.0 * t["dt"][low]
-    pen_fire = float(engine.penalty(t["dyn_i"], pred, t["dt"], sev,
-                                    cur_mask=torch.ones_like(t["mask_i"]),
-                                    patient_ids=[str(x) for x in ids.tolist()])["total"])
-    # every cell unmeasured -> nothing to penalize
-    empty_mask = torch.zeros_like(t["mask_i"])
-    pen_masked = float(engine.penalty(t["dyn_i"], pred, t["dt"], sev,
-                                      cur_mask=empty_mask,
-                                      patient_ids=[str(x) for x in ids.tolist()])["total"])
-    assert pen_fire > 0, "R3 did not fire on inverted ordering"
-    assert pen_masked == 0.0, "R3 must ignore unobserved cells"
+    pred = _with_rates(study, t, 2.0 * (1.0 - sev.mean(dim=1)))  # inverted ordering
+    pids = list(t["patient_ids"])
+    base = float(engine.penalty(t["dyn_i"], pred, t["dt"], sev, patient_ids=pids)["rank_order"])
+    assert base > 0
+    # repeat every item of one patient 5 more times: per-patient means are
+    # unchanged, so a unique-patient rule must give the identical penalty
+    extra = [k for k, p in enumerate(pids) if p == pids[0]] * 5
+    idx = torch.cat([torch.arange(len(pids)), torch.tensor(extra, dtype=torch.long)])
+    dup = float(engine.penalty(t["dyn_i"][idx], pred[idx], t["dt"][idx], sev[idx],
+                               patient_ids=[pids[k] for k in idx.tolist()])["rank_order"])
+    assert dup == pytest.approx(base, rel=1e-5)
+    # every current cell unobserved -> no patient enters R3, nothing penalized
+    masked = engine.penalty(t["dyn_i"], pred, t["dt"], sev,
+                            cur_mask=torch.zeros_like(t["mask_i"]), patient_ids=pids)
+    assert "rank_order" not in masked
+    assert float(masked["total"]) == 0.0
+
+
+def test_r2_slack_is_absolute_not_per_year():
+    """Measurement noise does not grow with the gap between visits: the same
+    reversal is tolerated (or flagged) identically at 6 months and 3 years."""
+    study, prepared = _engine_and_lookup()
+    engine = prepared.engine
+    cur = np.zeros((4, len(study.dyn_specs)))
+    sev = np.full((4, 3), 0.5)
+    for factor, offset, expected in ((0.5, 0.0, 0.0), (1.0, 0.1, 1.0)):
+        pred = cur.copy()
+        for d, spec in engine.monotonic_specs:   # reverse every A/N marker
+            amount = factor * engine.capacity.noise_slacks[spec.name] + offset
+            pred[:, d] = (-1.0 if spec.higher_is_worse else 1.0) * amount
+        for dt in (0.5, 3.0):
+            r = engine.violation_rates(cur, pred, np.full(4, dt), sev)
+            assert r["monotonic_violation_rate"] == expected, (factor, dt)
+            pen = engine.penalty(torch.as_tensor(cur, dtype=torch.float32),
+                                 torch.as_tensor(pred, dtype=torch.float32),
+                                 torch.full((4,), dt), torch.as_tensor(sev, dtype=torch.float32))
+            assert (float(pen["monotonic"]) > 0) == bool(expected), (factor, dt)
+
+
+def test_violation_rates_skip_unmeasured_predictions():
+    study, prepared = _engine_and_lookup()
+    engine = prepared.engine
+    cur = np.zeros((2, len(study.dyn_specs)))
+    pred = cur.copy()
+    for d, spec in engine.monotonic_specs:                        # clear reversals
+        pred[0, d] = (-1.0 if spec.higher_is_worse else 1.0) * 10.0
+    pred[1, :] = np.nan                                           # nothing measured
+    r = engine.violation_rates(cur, pred, np.ones(2), np.full((2, 3), 0.5))
+    assert r["monotonic_violation_rate"] == 1.0   # NaN row excluded, not a pass

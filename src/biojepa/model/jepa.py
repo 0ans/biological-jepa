@@ -9,8 +9,10 @@ Architecture (per the research proposal):
   - A target encoder (EMA copy, no gradients) encodes the actually-observed
     future state; the JEPA loss is the distance between prediction and target
     embedding.
-  - VICReg-style variance/covariance regularization prevents representation
-    collapse (the classic JEPA failure mode; cf. LeJEPA's theoretical view).
+  - VICReg-style variance/covariance regularization on the PREDICTED
+    embedding counters representation collapse (the classic JEPA failure
+    mode). The EMA target branch carries no gradient, so regularizing it
+    would be a constant; it is deliberately not included in the loss.
   - A light decode head maps latents back to standardized clinical features:
     it supervises the representation and carries the biological-rule penalty,
     which shapes the PREDICTED trajectories (R1 causal capacity, R2
@@ -29,12 +31,32 @@ HIDDEN = 128
 
 
 def mlp(dims) -> nn.Sequential:
+    """Linear layers with SiLU + LayerNorm after every layer except the last.
+
+    The output layer is identified by POSITION: comparing widths would
+    silently drop the activation of a hidden layer whose width happens to
+    equal the output width (collapsing two layers into one linear map)."""
     layers = []
-    for a, b in zip(dims[:-1], dims[1:]):
+    n_layers = len(dims) - 1
+    for k, (a, b) in enumerate(zip(dims[:-1], dims[1:])):
         layers += [nn.Linear(a, b)]
-        if b != dims[-1]:
+        if k < n_layers - 1:
             layers += [nn.SiLU(), nn.LayerNorm(b)]
     return nn.Sequential(*layers)
+
+
+def var_hinge(z: torch.Tensor) -> torch.Tensor:
+    """VICReg variance hinge: keep each embedding dimension's std >= 1."""
+    std = torch.sqrt(z.var(dim=0) + 1e-4)
+    return F.relu(1.0 - std).mean()
+
+
+def cov_pen(z: torch.Tensor) -> torch.Tensor:
+    """VICReg covariance penalty: decorrelate embedding dimensions."""
+    zc = z - z.mean(dim=0)
+    C = (zc.T @ zc) / (z.shape[0] - 1)
+    d = C.shape[0]
+    return (C - torch.diag(torch.diag(C))).pow(2).sum() / d
 
 
 class Encoder(nn.Module):
@@ -80,7 +102,8 @@ class BioJEPA(nn.Module):
 
     def loss(self, x_i, x_j, dt_feat, dyn_std_j, mask_j, dyn_std_i, mask_i,
              rule_engine=None, severity=None, dt=None,
-             w_lat=1.0, w_std=0.5, w_cov=0.25, w_sup=1.0, w_bio=0.0):
+             w_lat=1.0, w_std=0.5, w_cov=0.25, w_sup=1.0, w_bio=0.0,
+             patient_ids=None):
         z_i, z_hat = self.forward(x_i, dt_feat)
         with torch.no_grad():
             z_t = self.target_encoder(x_j)
@@ -88,19 +111,10 @@ class BioJEPA(nn.Module):
         losses: dict[str, torch.Tensor] = {}
         losses["latent"] = F.smooth_l1_loss(z_hat, z_t)
 
-        # VICReg variance hinge + covariance penalties (anti-collapse)
-        def var_hinge(z):
-            std = torch.sqrt(z.var(dim=0) + 1e-4)
-            return F.relu(1.0 - std).mean()
-
-        def cov_pen(z):
-            zc = z - z.mean(dim=0)
-            C = (zc.T @ zc) / (z.shape[0] - 1)
-            d = C.shape[0]
-            return (C - torch.diag(torch.diag(C))).pow(2).sum() / d
-
-        losses["std_reg"] = var_hinge(z_hat) + var_hinge(z_t)
-        losses["cov_reg"] = cov_pen(z_hat) + cov_pen(z_t)
+        # VICReg variance hinge + covariance penalty (anti-collapse) on the
+        # trainable predicted embedding; z_t is a no-gradient EMA target
+        losses["std_reg"] = var_hinge(z_hat)
+        losses["cov_reg"] = cov_pen(z_hat)
 
         # decode-head supervision: current state (encoder) + future state (through predictor)
         pred_dyn = self.head(z_hat)
@@ -112,9 +126,10 @@ class BioJEPA(nn.Module):
             + w_sup * (losses["sup_future"] + losses["sup_current"])
 
         if rule_engine is not None and w_bio > 0:
-            with torch.no_grad():
-                cur_gt = dyn_std_i  # ground-truth current state: rules compare against reality
-            bio = rule_engine.penalty(cur_gt, pred_dyn, dt, severity)
+            # rules compare the prediction against the OBSERVED current state;
+            # imputed (unobserved) current cells are masked out, as in v2
+            bio = rule_engine.penalty(dyn_std_i, pred_dyn, dt, severity, cur_mask=mask_i,
+                                      patient_ids=patient_ids)
             losses["bio_total"] = bio["total"]
             losses["bio_decline_capacity"] = bio.get("decline_capacity", torch.zeros(()))
             losses["bio_monotonic"] = bio.get("monotonic", torch.zeros(()))
@@ -196,19 +211,9 @@ class BioJEPA2(nn.Module):
 
         losses: dict[str, torch.Tensor] = {}
         losses["latent"] = F.smooth_l1_loss(z_hat, z_t)
-
-        def var_hinge(z):
-            std = torch.sqrt(z.var(dim=0) + 1e-4)
-            return F.relu(1.0 - std).mean()
-
-        def cov_pen(z):
-            zc = z - z.mean(dim=0)
-            C = (zc.T @ zc) / (z.shape[0] - 1)
-            d = C.shape[0]
-            return (C - torch.diag(torch.diag(C))).pow(2).sum() / d
-
-        losses["std_reg"] = var_hinge(z_hat) + var_hinge(z_t)
-        losses["cov_reg"] = cov_pen(z_hat) + cov_pen(z_t)
+        # anti-collapse on the trainable predicted embedding (z_t has no gradient)
+        losses["std_reg"] = var_hinge(z_hat)
+        losses["cov_reg"] = cov_pen(z_hat)
 
         pred_dyn = self.head(z_hat)
         if self.delta_mode:
@@ -216,6 +221,8 @@ class BioJEPA2(nn.Module):
             # decode (pred_abs = current observed + predicted delta). The same
             # head is NOT also asked to decode the absolute current state —
             # that mixed objective was inconsistent (external review, round 3).
+            # An unobserved current cell is imputed as 0 (the training mean)
+            # both here and at inference, so target and anchor stay consistent.
             losses["sup_future"] = masked_mse(pred_dyn, dyn_j - dyn_i, mask_j)
             pred_abs = dyn_i + pred_dyn
         else:

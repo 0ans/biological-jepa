@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "biojepa"
-version = "0.3.0"
+version = "0.4.0"
 description = "Biologically-constrained JEPA for disease progression"
 requires-python = ">=3.10"
 dependencies = ["torch", "pandas", "numpy", "scikit-learn", "matplotlib", "pyreadr"]

@@ -4,7 +4,6 @@ import pytest
 import torch
 from types import SimpleNamespace
 from biojepa.model.baselines import GRUProg, gru_collate
-from biojepa.evaluate import gru_rollout
 
 def study():
     subject = SimpleNamespace(times=np.array([0., .5, 1.]), dyn=np.array([[26.,1.],[25.,1.5],[24.,2.]]))

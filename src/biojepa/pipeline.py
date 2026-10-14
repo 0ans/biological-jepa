@@ -33,10 +33,13 @@ class Prepared:
     engine: BiologicalRuleEngine
     _cache: dict = field(default_factory=dict, repr=False)
 
-    def visit_steps(self, subject_idx: int, upto: int) -> np.ndarray:
-        """[n_visits, 2D+dt_dim] step vectors for visits 0..upto (inclusive)."""
+    def visit_steps(self, subject_idx: int, upto: int, dyn_std=None) -> np.ndarray:
+        """[n_visits, 2D+dt_dim] step vectors for visits 0..upto (inclusive).
+        `dyn_std` optionally replaces the subject's standardized history (e.g.
+        a degraded copy for the missingness stress test)."""
         s = self.study.subjects[subject_idx]
-        dyn_std = self.dyn_by_subject[subject_idx]
+        if dyn_std is None:
+            dyn_std = self.dyn_by_subject[subject_idx]
         steps, prev = [], None
         for t, vt in enumerate(s.times[: upto + 1]):
             gap = 0.0 if prev is None else vt - prev
@@ -47,59 +50,82 @@ class Prepared:
             prev = vt
         return np.array(steps, dtype=np.float32)
 
-    def _build_split(self, split: str):
-        pairs = self.pairs[split]
+    def input_tensors(self, pairs: list[dict], dyn_by_subject=None) -> dict:
+        """Model INPUTS for (subject, i, dt) queries — the target visit j is
+        not needed, so this also serves forecasts for horizons with no
+        observed follow-up visit. `dyn_by_subject` optionally swaps in a
+        degraded input history (truth is never read here)."""
+        if not pairs:
+            raise ValueError("no pairs to build inputs for")
+        lookup = dyn_by_subject if dyn_by_subject is not None else self.dyn_by_subject
         D = len(self.study.dyn_specs)
         n = len(pairs)
         L = max(p["i"] + 1 for p in pairs)
-        Lj = max(p["j"] + 1 for p in pairs)
         xs = np.zeros((n, 2 * D + self.x_context.shape[1]), dtype=np.float32)
-        xjs = np.zeros_like(xs)
         seq_i = np.zeros((n, L, self.step_dim), dtype=np.float32)
-        seq_j = np.zeros((n, Lj, self.step_dim), dtype=np.float32)
         len_i = np.zeros(n, dtype=np.int64)
-        len_j = np.zeros(n, dtype=np.int64)
         ctx = np.zeros((n, self.x_context.shape[1]), dtype=np.float32)
         dts = np.zeros(n, dtype=np.float32)
+        dyn_i = np.zeros((n, D), dtype=np.float32)
+        mask_i = np.zeros((n, D), dtype=np.float32)
         for p_i, pair in enumerate(pairs):
             s_idx = pair["subject"]
-            di = np.nan_to_num(self.dyn_by_subject[s_idx][pair["i"]], nan=0.0)
-            mi = np.isfinite(self.dyn_by_subject[s_idx][pair["i"]]).astype(np.float32)
-            dj = np.nan_to_num(self.dyn_by_subject[s_idx][pair["j"]], nan=0.0)
-            mj = np.isfinite(self.dyn_by_subject[s_idx][pair["j"]]).astype(np.float32)
-            xs[p_i] = np.concatenate([di, mi, self.x_context[s_idx]])
-            xjs[p_i] = np.concatenate([dj, mj, self.x_context[s_idx]])
-            steps_i = self.visit_steps(s_idx, pair["i"])
-            steps_j = self.visit_steps(s_idx, pair["j"])
+            dt = float(pair["dt"])
+            if not np.isfinite(dt) or dt <= 0:
+                raise ValueError(f"Forecast gap must be positive and finite, got {dt}")
+            cur = lookup[s_idx][pair["i"]]
+            dyn_i[p_i] = np.nan_to_num(cur, nan=0.0)
+            mask_i[p_i] = np.isfinite(cur).astype(np.float32)
+            xs[p_i] = np.concatenate([dyn_i[p_i], mask_i[p_i], self.x_context[s_idx]])
+            steps_i = self.visit_steps(s_idx, pair["i"], dyn_std=lookup[s_idx])
             seq_i[p_i, : len(steps_i)] = steps_i
-            seq_j[p_i, : len(steps_j)] = steps_j
             len_i[p_i] = len(steps_i)
-            len_j[p_i] = len(steps_j)
             ctx[p_i] = self.x_context[s_idx]
-            dts[p_i] = pair["dt"]
-        four = fourier_time(dts)
+            dts[p_i] = dt
         return {
             "x_i": torch.as_tensor(xs),
-            "x_j": torch.as_tensor(xjs),
             "ctx": torch.as_tensor(ctx),
             "seq_i": torch.as_tensor(seq_i),
             "len_i": torch.as_tensor(len_i),
+            "dt_feat": torch.as_tensor(fourier_time(dts)),
+            "dt": torch.as_tensor(dts),
+            "dyn_i": torch.as_tensor(dyn_i),
+            "mask_i": torch.as_tensor(mask_i),
+            "patient_ids": [self.study.subjects[pp["subject"]].sid for pp in pairs],
+        }
+
+    def _build_split(self, split: str):
+        pairs = self.pairs[split]
+        if not pairs:
+            raise ValueError(f"split '{split}' has no prediction pairs")
+        out = self.input_tensors(pairs)
+        D = len(self.study.dyn_specs)
+        n = len(pairs)
+        Lj = max(p["j"] + 1 for p in pairs)
+        xjs = np.zeros((n, 2 * D + self.x_context.shape[1]), dtype=np.float32)
+        seq_j = np.zeros((n, Lj, self.step_dim), dtype=np.float32)
+        len_j = np.zeros(n, dtype=np.int64)
+        dyn_j = np.zeros((n, D), dtype=np.float32)
+        mask_j = np.zeros((n, D), dtype=np.float32)
+        for p_i, pair in enumerate(pairs):
+            s_idx = pair["subject"]
+            fut = self.dyn_by_subject[s_idx][pair["j"]]
+            dyn_j[p_i] = np.nan_to_num(fut, nan=0.0)
+            mask_j[p_i] = np.isfinite(fut).astype(np.float32)
+            xjs[p_i] = np.concatenate([dyn_j[p_i], mask_j[p_i], self.x_context[s_idx]])
+            steps_j = self.visit_steps(s_idx, pair["j"])
+            seq_j[p_i, : len(steps_j)] = steps_j
+            len_j[p_i] = len(steps_j)
+        out.update({
+            "x_j": torch.as_tensor(xjs),
             "seq_j": torch.as_tensor(seq_j),
             "len_j": torch.as_tensor(len_j),
-            "dt_feat": torch.as_tensor(four),
-            "dt": torch.as_tensor(dts),
-            "dyn_j": torch.as_tensor(np.stack([
-                np.nan_to_num(self.dyn_by_subject[p["subject"]][p["j"]], nan=0.0) for p in pairs])),
-            "mask_j": torch.as_tensor(np.stack([
-                np.isfinite(self.dyn_by_subject[p["subject"]][p["j"]]).astype(np.float32) for p in pairs])),
-            "dyn_i": torch.as_tensor(np.stack([
-                np.nan_to_num(self.dyn_by_subject[p["subject"]][p["i"]], nan=0.0) for p in pairs])),
-            "mask_i": torch.as_tensor(np.stack([
-                np.isfinite(self.dyn_by_subject[p["subject"]][p["i"]]).astype(np.float32) for p in pairs])),
+            "dyn_j": torch.as_tensor(dyn_j),
+            "mask_j": torch.as_tensor(mask_j),
             "severity": torch.as_tensor(self.severity[split], dtype=torch.float32),
-            "patient_ids": [self.study.subjects[pp["subject"]].sid for pp in pairs],
             "pair_index": pairs,
-        }
+        })
+        return out
 
     def pair_tensors(self, split: str, device=torch.device("cpu")) -> dict[str, torch.Tensor]:
         if split not in self._cache:

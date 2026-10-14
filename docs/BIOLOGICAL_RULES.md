@@ -48,29 +48,48 @@ reasoning about the disease — it is exploiting statistical shortcuts.
    actually produces.
 5. `r0 = 0.10` (a small floor) is the only constant, chosen conservatively.
 
+**Known limitation (rate units of the noise margin):** R1 compares decline
+*rates* (σ per year). Measurement noise in a rate scales with 1/Δt, but the
+noise envelope is a single quantile pooled over the 1-, 2- and 3-year
+training pairs, so it is relatively loose at 3 years and tight at 1 year.
+This is a stated design choice; a horizon-specific envelope is future work.
+
 **Known limitation (scalar severity):** severity is summarized as a scalar
 (mean of the A/T/N proxies). Two patients with different biomarker profiles
 can share the same scalar severity — biologically distinct pathways are not
 distinguished. A vector-conditional capacity (per-marker capacity curves) is
 the natural next step and is listed as future work.
 
-**Penalty (differentiable).** `ReLU(rate − capacity)²`, averaged over clinical
-features and the batch. Applied to the decoded *predicted* future state
-against the ground-truth current state, so it shapes the trajectory the model
-outputs — including where future biomarkers are missing and at inference time.
+**Penalty (differentiable, training only).** `ReLU(rate − capacity)²`,
+averaged over the clinical cells that are *observed at the current visit*
+(imputed current values are masked out). It compares the decoded *predicted*
+future state with the observed current state and never reads the future
+ground truth, so it also shapes predictions for pairs whose future values are
+missing. At inference no penalty is computed; the rules act only through what
+the model learned.
 
 ## Rule R2 — Monotonicity ("pathology does not reverse")
 
-**Statement.** Amyloid burden and neurodegeneration markers cannot improve
-beyond a per-feature noise slack on study timescales:
+**Statement.** Amyloid burden (A) and neurodegeneration markers (N) cannot
+improve beyond a per-feature measurement-noise slack:
 
-    penalty = ReLU(improvement − slack_f · Δt)²
+    penalty = ReLU(improvement − slack_f)²
+
+The slack is an **absolute** amount in standardized units (σ), identical at
+every horizon: measurement noise on the difference between two visits does
+not grow with the time between them. (Before October 2026 the slack was
+calibrated as an absolute amount but applied multiplied by Δt, which allowed
+three times more reversal at 3 years than at 1 year; corrected.)
 
 **Grounding.** Fibrillar amyloid deposition and neuronal death are effectively
 irreversible within trial/follow-up horizons; observed "improvements" are
 measurement variability. `slack_f` is calibrated from training data as
-`2 × RMS(apparent reversals)` (in σ units, capped at 1.5σ) — apparent
-reversals in the observed cohort are pure noise by assumption of the cascade.
+`2 × RMS(per-patient mean apparent reversal)` (σ units, at least
+`RuleConfig.slack` = 0.25σ, capped at 1.5σ) — apparent reversals in the
+observed cohort are treated as noise by assumption of the cascade.
+
+**Tau (T) is not constrained:** neither real cohort has a longitudinal tau
+measure, so no tau-monotonicity rule is encoded.
 
 **Clinical features (C) are intentionally NOT monotonic** — retest/practice
 effects are real and documented; forcing monotone cognition would encode a
@@ -95,31 +114,44 @@ patients has learned an anti-causal shortcut. The quartile (population-level)
 formulation keeps the rule statistical — individual variation is respected —
 while constraining the population ordering.
 
-**Applicability:** all studies with severity variation (ADNI full; OASIS via
-N-severity; synthetic). Evaluated diagnostically via the amyloid-subgroup
-calibration analysis in RESULTS.md.
+**Applicability:** all studies with severity variation (ADNI: baseline A/T/N
+severity; OASIS: N-severity only; synthetic). Requires patient identifiers
+in the batch (per-patient aggregation) and at least 8 unique patients with
+observed cells. Also checked diagnostically via the amyloid-subgroup
+calibration analysis.
 
 ## Dataset applicability (explicit, not hidden)
 
 | Rule | ADNI sample | OASIS-2 | Synthetic cascade |
 |---|---|---|---|
-| R1 causal capacity (A/T/N severity) | Yes — full (baseline A/T/N biomarkers) | Partial — N only (no A/T measured; A/T severity neutral) | Yes — full |
-| R2 amyloid/tau monotonicity | N/A (A/T at baseline only — no trajectory) | N/A | Yes |
-| R2 neurodegeneration monotonicity | N/A (same reason) | Yes longitudinal nWBV | Yes |
+| R1 causal capacity (A/T/N severity) | Yes (baseline A/T/N biomarkers) | Partial — N only (no A/T measured; A/T severity neutral) | Yes |
+| R2 amyloid monotonicity | N/A (amyloid at baseline only — no trajectory) | N/A | Yes |
+| R2 neurodegeneration monotonicity | N/A (no longitudinal N feature) | Yes — longitudinal nWBV | Yes |
+| Tau monotonicity | not encoded | not encoded | not encoded |
+| R3 population ordering | Yes | Yes (N-severity) | Yes |
 
-The synthetic cascade study exists precisely so that every rule — including
-A/T/N monotonicity — is verified end-to-end against known ground truth
-(see `tests/test_bio_rules.py`), independent of real-data availability limits.
+The synthetic cascade study exists so that R1, R2 (A and N) and R3 are
+verified end-to-end against known ground truth (see `tests/test_bio_rules.py`),
+independent of real-data availability limits.
+
+## How to read violation rates
+
+R1 envelopes are 90th-percentile curves of the *training* data plus margins,
+so real observed trajectories also exceed them at some rate. Every results
+table therefore reports the violation rate of the **observed** future values
+next to each model's rate. A model far below the observed rate is producing
+smoother trajectories than real patients show — that is not evidence of
+better biology, only of agreement with the programmed assumptions.
 
 ## What we did NOT encode (and why)
 
 - **Cognitive monotonicity**: false (practice effects).
 - **Hard cascade ordering within a patient** (e.g., "tau cannot rise before
   amyloid"): the accessible ADNI sample measures A/T at baseline only, so
-  there is no trajectory to constrain. The cross-patient version (higher
-  pathology burden should support higher decline risk) is evaluated via the
-  amyloid-subgroup calibration analysis (see RESULTS.md) rather than forced
-  as a penalty.
+  there is no trajectory to constrain. The cross-patient, population-level
+  version is encoded as R3 and additionally checked with the amyloid-subgroup
+  calibration analysis.
+- **Tau monotonicity**: no longitudinal tau measure in either real cohort.
 - **SNAP caveat**: ~10-30% of amyloid-negative subjects show
   neurodegeneration-of-unknown-cause and can decline (Jack et al. 2016). R1
   handles this conservatively: neurodegeneration severity raises the capacity

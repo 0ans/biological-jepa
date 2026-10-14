@@ -28,7 +28,12 @@ class Subject:
     patho_status: np.ndarray   # [K] binary pathology status flags (0/1, -1 = unknown)
     group: str                 # diagnostic group string
     converts: bool             # converts to dementia during study (label)
-    time_under_risk: float | None = None   # years to conversion or end of follow-up
+    # years from baseline to conversion (converters) or to the end of
+    # follow-up (non-converters); None when the timing cannot be determined
+    time_under_risk: float | None = None
+    # already demented at the baseline visit: such subjects cannot "convert"
+    # and are excluded from every conversion analysis
+    dementia_at_baseline: bool = False
 
 
 @dataclass
@@ -51,25 +56,27 @@ class Study:
 
 
 def subject_split(study: Study, fractions=(0.7, 0.15, 0.15), seed: int = 0, stratify: bool = True):
-    """Split subject indices into train/val/test, stratified by group. No subject
-    appears in more than one split (prevents longitudinal leakage)."""
+    """Split subject indices into train/val/test (stratified by group unless
+    stratify=False). No subject appears in more than one split (prevents
+    longitudinal leakage)."""
     rng = np.random.RandomState(seed)
-    groups = {}
-    for idx, s in enumerate(study.subjects):
-        groups.setdefault(s.group, []).append(idx)
+    if stratify:
+        groups: dict[str, list[int]] = {}
+        for idx, s in enumerate(study.subjects):
+            groups.setdefault(s.group, []).append(idx)
+        blocks = [np.array(members) for _, members in sorted(groups.items())]
+    else:
+        blocks = [np.arange(len(study.subjects))]
     train, val, test = [], [], []
-    for g, members in sorted(groups.items()):
-        members = np.array(members)
+    for members in blocks:
+        members = members.copy()
         rng.shuffle(members)
         n = len(members)
-        if stratify:
-            n_tr = int(round(fractions[0] * n))
-            n_va = int(round(fractions[1] * n))
-            train += members[:n_tr].tolist()
-            val += members[n_tr:n_tr + n_va].tolist()
-            test += members[n_tr + n_va:].tolist()
-        else:
-            train += members.tolist()
+        n_tr = int(round(fractions[0] * n))
+        n_va = int(round(fractions[1] * n))
+        train += members[:n_tr].tolist()
+        val += members[n_tr:n_tr + n_va].tolist()
+        test += members[n_tr + n_va:].tolist()
     return set(train), set(val), set(test)
 
 
@@ -129,3 +136,31 @@ def make_pair_sets(study: Study, horizons=(1.0, 2.0, 3.0), window=0.25, min_visi
                     "dt": float(s.times[j] - s.times[i]),
                 })
     return pairs
+
+
+def check_event_timing(study: Study, slack_years: float = 0.5,
+                       max_inconsistent_share: float = 0.10) -> dict:
+    """Sanity check of `time_under_risk` before any conversion analysis.
+
+    The conversion design assumes `time_under_risk` is in YEARS FROM THE
+    BASELINE VISIT: the conversion time for converters and the censoring time
+    for non-converters, so it can never exceed the last recorded visit by
+    more than visit-scheduling slack. A source coded differently (e.g. months,
+    or a different origin) shows up as many inconsistent subjects.
+    Returns diagnostics with `valid` = False when the share of inconsistent
+    subjects exceeds `max_inconsistent_share`."""
+    checked, bad, examples = 0, 0, []
+    for s in study.subjects:
+        tur = s.time_under_risk
+        if s.dementia_at_baseline or tur is None or not np.isfinite(tur) or len(s.times) == 0:
+            continue
+        checked += 1
+        last = float(np.max(s.times))
+        if tur < 0 or tur > last + slack_years:
+            bad += 1
+            if len(examples) < 5:
+                examples.append({"sid": s.sid, "time_under_risk": float(tur), "last_visit": last})
+    share = bad / checked if checked else 0.0
+    return {"n_checked": checked, "n_inconsistent": bad, "share_inconsistent": share,
+            "examples": examples, "slack_years": slack_years,
+            "valid": checked > 0 and share <= max_inconsistent_share}
